@@ -35,6 +35,21 @@ The adapter runs a local HTTP server that:
 - SSE streaming simulation (for non-streaming providers)
 - OAuth authentication for ChatGPT (PKCE flow)
 
+## Installation for AI Agents
+
+Copy and paste this prompt to your LLM agent (Claude Code, Cursor, etc.):
+
+```
+Install and configure CC-Adapter by following the instructions here:
+https://raw.githubusercontent.com/Jakevin/CC-Adapter/master/docs/agent-install.md
+```
+
+Or let the agent fetch it directly:
+
+```bash
+curl -s https://raw.githubusercontent.com/Jakevin/CC-Adapter/master/docs/agent-install.md
+```
+
 ## Quick Start
 
 ### 1. Install

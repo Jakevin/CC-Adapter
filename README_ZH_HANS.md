@@ -34,6 +34,21 @@ Claude Code ──[Anthropic API]──▶ Adapter (localhost) ─┤
 - SSE 流式模拟（用于不支持流式的供应商）
 - ChatGPT OAuth 认证（PKCE 流程）
 
+## AI Agent 安装指引
+
+将以下提示粘贴到你的 LLM Agent（Claude Code、Cursor 等）中：
+
+```
+Install and configure CC-Adapter by following the instructions here:
+https://raw.githubusercontent.com/Jakevin/CC-Adapter/master/docs/agent-install.md
+```
+
+或让 Agent 直接获取安装指引：
+
+```bash
+curl -s https://raw.githubusercontent.com/Jakevin/CC-Adapter/master/docs/agent-install.md
+```
+
 ## 快速开始
 
 ### 1. 安装

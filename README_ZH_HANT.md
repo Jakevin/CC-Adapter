@@ -34,6 +34,21 @@ Claude Code ──[Anthropic API]──▶ Adapter (localhost) ─┤
 - SSE 串流模擬（用於不支援串流的供應商）
 - ChatGPT OAuth 認證（PKCE 流程）
 
+## AI Agent 安裝指引
+
+將以下提示貼到你的 LLM Agent（Claude Code、Cursor 等）中：
+
+```
+Install and configure CC-Adapter by following the instructions here:
+https://raw.githubusercontent.com/Jakevin/CC-Adapter/master/docs/agent-install.md
+```
+
+或讓 Agent 直接取得安裝指引：
+
+```bash
+curl -s https://raw.githubusercontent.com/Jakevin/CC-Adapter/master/docs/agent-install.md
+```
+
 ## 快速開始
 
 ### 1. 安裝

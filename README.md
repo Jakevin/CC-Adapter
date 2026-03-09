@@ -96,9 +96,9 @@ type = "chatgpt"
 default = "gpt-5.4"
 ```
 
-### 3. Login (ChatGPT only)
+### 3. Login (ChatGPT subscribers only)
 
-If using ChatGPT provider, run the OAuth login flow first:
+If using a ChatGPT subscription, run the OAuth login flow first:
 
 ```bash
 ./target/release/claude-adapter login
@@ -284,7 +284,6 @@ curl http://127.0.0.1:8080/health
 
 ## Current Limitations
 
-- **Gemini provider** is not yet implemented (planned for future release).
 - Extended Thinking blocks are converted to text with `<thinking>` tags.
 - ChatGPT OAuth uses the same flow as the official Codex CLI, for personal use only.
 

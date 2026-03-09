@@ -95,9 +95,9 @@ type = "chatgpt"
 default = "gpt-5.4"
 ```
 
-### 3. 登录（仅 ChatGPT）
+### 3. 登录（仅限 ChatGPT 订阅用户）
 
-若使用 ChatGPT 供应商，请先执行 OAuth 登录流程：
+若使用 ChatGPT 订阅方案，请先执行 OAuth 登录流程：
 
 ```bash
 ./target/release/claude-adapter login
@@ -283,7 +283,6 @@ curl http://127.0.0.1:8080/health
 
 ## 当前限制
 
-- **Gemini 供应商**尚未实现（计划在未来版本加入）。
 - 扩展思考块会转换为带 `<thinking>` 标签的文本。
 - ChatGPT OAuth 使用与官方 Codex CLI 相同的流程，仅限个人使用。
 

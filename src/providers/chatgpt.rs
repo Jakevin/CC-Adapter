@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -130,13 +130,77 @@ impl ChatGPTProvider {
             .await
             .context("無法讀取 ChatGPT Codex 回應 / Failed to read ChatGPT Codex response")?;
 
-        info!(
-            status = %status,
-            body_len = body.len(),
-            "收到 ChatGPT Codex 回應 / Received response from ChatGPT Codex"
-        );
+        log_received_response(status, body.len(), &request.model);
         debug!(body = %body, "ChatGPT Codex 回應內容 / ChatGPT Codex response body");
 
         Ok(body)
+    }
+}
+
+fn log_received_response(status: StatusCode, body_len: usize, model: &str) {
+    info!(
+        status = %status,
+        body_len,
+        model = %model,
+        "收到 ChatGPT Codex 回應 / Received response from ChatGPT Codex"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+    use std::sync::{Arc, Mutex};
+    use tracing::subscriber::with_default;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct TestWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl<'a> MakeWriter<'a> for TestWriter {
+        type Writer = TestWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            TestWriterGuard {
+                buffer: self.buffer.clone(),
+            }
+        }
+    }
+
+    struct TestWriterGuard {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl io::Write for TestWriterGuard {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_received_response_log_includes_model() {
+        let writer = TestWriter::default();
+        let buffer = writer.buffer.clone();
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer)
+            .without_time()
+            .with_ansi(false)
+            .finish();
+
+        with_default(subscriber, || {
+            log_received_response(StatusCode::OK, 123, "gpt-5.3-codex");
+        });
+
+        let output = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("Received response from ChatGPT Codex"));
+        assert!(output.contains("model=gpt-5.3-codex"));
     }
 }

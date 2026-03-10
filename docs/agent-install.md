@@ -121,6 +121,52 @@ base_url = "<ASK_USER>"
 default = "<ASK_USER>"
 ```
 
+### Option E (advanced): Multiple providers + routing
+
+For advanced setups, the agent can help the user configure **multiple providers at once** and route each Claude model name to a specific provider/model pair:
+
+```toml
+[server]
+host = "127.0.0.1"
+port = 8080
+log_level = "info"
+log_file = "adapter.log"
+
+[providers.chatgpt]
+type = "chatgpt"
+# ChatGPT uses OAuth, no api_key/base_url needed
+
+[providers.openai-compatible]
+type = "openai"
+api_key = "<ASK_USER>"                     # e.g. OpenAI / Grok key
+base_url = "https://api.openai.com/v1"    # or https://api.x.ai/v1, etc.
+supports_streaming = false                # let the adapter simulate SSE
+
+[providers.anthropic-compatible]
+type = "anthropic-compatible"
+api_key = "<ASK_USER>"
+base_url = "<ASK_USER_ANTHROPIC_BASE_URL>"  # e.g. https://your-host/v1
+supports_streaming = false
+
+[models]
+default_provider = "chatgpt"
+default_model = "gpt-5.4"
+
+# Routing table: Anthropic model name → provider + model
+# Longest-prefix matching is supported, which is useful for dated model names like
+# "claude-haiku-4-5-20251001" (using key "claude-haiku-4-5").
+[models.routing]
+"claude-opus-4-6"   = { provider = "chatgpt",             model = "gpt-5.4" }
+"claude-sonnet-4-6" = { provider = "openai-compatible",   model = "gpt-4.1" }
+"claude-haiku-4-5"  = { provider = "anthropic-compatible", model = "<ASK_USER_MODEL>" }
+```
+
+The adapter resolves `models.routing` as follows:
+
+1. Exact match on the full model name.
+2. If no exact match, use the **longest prefix** key where `incoming_model.starts_with(key)`.
+3. If still no match, fall back to `default_provider` + `default_model`.
+
 ## Step 3: Start the Adapter
 
 ```bash

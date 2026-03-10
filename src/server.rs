@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -16,49 +17,65 @@ use crate::convert::response::{convert_response, response_to_sse_events};
 use crate::error::AppError;
 use crate::providers::openai::OpenAIProvider;
 use crate::providers::chatgpt::ChatGPTProvider;
+use crate::providers::anthropic::AnthropicCompatibleProvider;
 use crate::types::anthropic::MessagesRequest;
 
-/// 供應商列舉：支援 OpenAI（含 Grok）或 ChatGPT OAuth
-/// Provider enum: supports OpenAI (including Grok) or ChatGPT OAuth
+/// 供應商列舉：支援 OpenAI 相容（含 Grok）、ChatGPT OAuth、Anthropic 相容
+/// Provider enum: supports OpenAI-compatible (including Grok), ChatGPT OAuth, and Anthropic-compatible
 pub enum ProviderKind {
     OpenAI(OpenAIProvider),
     ChatGPT(ChatGPTProvider),
+    Anthropic(AnthropicCompatibleProvider),
 }
 
 /// 應用程式共享狀態（支援熱重載）
 /// Application shared state (supports hot-reload)
 pub struct AppState {
     pub config: RwLock<Config>,
-    pub provider: RwLock<ProviderKind>,
+    pub providers: RwLock<HashMap<String, ProviderKind>>,
     pub serve_args: ServeArgs,
 }
 
-/// 根據配置建構供應商實例
-/// Build a provider instance from configuration
-async fn build_provider(config: &Config) -> anyhow::Result<ProviderKind> {
-    match config.provider.provider_type.as_str() {
-        "chatgpt" => {
-            let chatgpt = ChatGPTProvider::new().await?;
-            Ok(ProviderKind::ChatGPT(chatgpt))
-        }
-        _ => {
-            let openai = OpenAIProvider::new(
-                config.provider.api_key.clone(),
-                config.provider.base_url.clone(),
-            );
-            Ok(ProviderKind::OpenAI(openai))
-        }
+/// 根據配置建構所有供應商實例
+/// Build all provider instances from configuration
+async fn build_providers(config: &Config) -> anyhow::Result<HashMap<String, ProviderKind>> {
+    let mut providers = HashMap::new();
+
+    for (name, provider_config) in &config.providers {
+        let kind = match provider_config.provider_type.as_str() {
+            "chatgpt" => {
+                let chatgpt = ChatGPTProvider::new().await?;
+                ProviderKind::ChatGPT(chatgpt)
+            }
+            "anthropic-compatible" => {
+                let anth = AnthropicCompatibleProvider::new(
+                    provider_config.api_key.clone(),
+                    provider_config.base_url.clone(),
+                );
+                ProviderKind::Anthropic(anth)
+            }
+            _ => {
+                let openai = OpenAIProvider::new(
+                    provider_config.api_key.clone(),
+                    provider_config.base_url.clone(),
+                );
+                ProviderKind::OpenAI(openai)
+            }
+        };
+        providers.insert(name.clone(), kind);
     }
+
+    Ok(providers)
 }
 
 /// 根據配置建構 AppState
 /// Build AppState based on configuration
 pub async fn build_app_state(config: Config, serve_args: ServeArgs) -> anyhow::Result<Arc<AppState>> {
-    let provider = build_provider(&config).await?;
+    let providers = build_providers(&config).await?;
 
     Ok(Arc::new(AppState {
         config: RwLock::new(config),
-        provider: RwLock::new(provider),
+        providers: RwLock::new(providers),
         serve_args,
     }))
 }
@@ -67,25 +84,24 @@ pub async fn build_app_state(config: Config, serve_args: ServeArgs) -> anyhow::R
 /// Reload config and rebuild provider (hot-reload core)
 pub async fn reload_config(state: &Arc<AppState>) -> anyhow::Result<()> {
     let new_config = Config::load(&state.serve_args)?;
-    let new_provider = build_provider(&new_config).await?;
+    let new_providers = build_providers(&new_config).await?;
 
-    let provider_type = new_config.provider.provider_type.clone();
-    let base_url = new_config.provider.base_url.clone();
-    let default_model = new_config.models.default.clone();
+    let default_provider = new_config.models.default_provider.clone();
+    let default_model = new_config.models.default_model.clone();
+    let provider_names: Vec<String> = new_config.providers.keys().cloned().collect();
 
-    // 先更新 provider 再更新 config，確保任何新進請求都能使用新的供應商
-    // Update provider first, then config, so any new request uses the new provider
-    *state.provider.write().await = new_provider;
+    *state.providers.write().await = new_providers;
     *state.config.write().await = new_config;
 
     eprintln!("\n  ⟳ config.toml 已更新，配置已熱重載");
     eprintln!("  ⟳ config.toml updated, configuration hot-reloaded");
-    eprintln!("    供應商 / Provider: {} ({})", provider_type, base_url);
+    eprintln!("    供應商 / Providers: {}", provider_names.join(", "));
+    eprintln!("    預設供應商 / Default provider: {}", default_provider);
     eprintln!("    預設模型 / Default model: {}\n", default_model);
 
     info!(
-        provider = %provider_type,
-        base_url = %base_url,
+        providers = ?provider_names,
+        default_provider = %default_provider,
         default_model = %default_model,
         "配置已熱重載 / Configuration hot-reloaded"
     );
@@ -94,18 +110,15 @@ pub async fn reload_config(state: &Arc<AppState>) -> anyhow::Result<()> {
 }
 
 /// 處理 POST /v1/messages 請求：接收 Anthropic 格式、轉換、轉發、回傳
-/// 當客戶端請求串流但供應商不支援時，Adapter 會以非串流方式呼叫供應商，再模擬 SSE 事件回傳。
+/// 根據模型路由表選擇對應的供應商。
 ///
 /// Handle POST /v1/messages: receive Anthropic format, convert, forward, and return.
-/// When client requests streaming but provider doesn't support it, Adapter calls provider
-/// without streaming, then simulates SSE events back to the client.
+/// Selects provider based on model routing table.
 pub async fn handle_messages(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(request): Json<MessagesRequest>,
 ) -> Result<Response, AppError> {
-    // 記錄收到的請求資訊
-    // Log incoming request details
     let anthropic_version = headers
         .get("anthropic-version")
         .and_then(|v| v.to_str().ok())
@@ -121,34 +134,59 @@ pub async fn handle_messages(
         "收到 Anthropic Messages API 請求 / Received Anthropic Messages API request"
     );
 
-    // debug 等級時印出完整的 Anthropic 請求 JSON
-    // Print the full Anthropic request JSON at debug level
     if let Ok(json) = serde_json::to_string_pretty(&request) {
         debug!("Anthropic 請求內容 / Anthropic request body:\n{}", json);
     }
 
     let original_model = request.model.clone();
 
-    // 取得 config 和 provider 的讀取鎖（多個請求可同時讀取，不阻塞）
-    // Acquire read locks on config and provider (multiple requests can read concurrently)
     let config = state.config.read().await;
-    let provider = state.provider.read().await;
+    let providers = state.providers.read().await;
 
-    // 依供應商類型分派不同的轉換與呼叫邏輯
-    // Dispatch to different conversion and call logic based on provider type
-    let anthropic_response = match &*provider {
+    // 根據模型路由表解析目標供應商與模型
+    // Resolve target provider and model from the routing table
+    let (provider_name, target_model) = config.models.resolve(&request.model);
+
+    info!(
+        provider = %provider_name,
+        target_model = %target_model,
+        "路由至供應商 / Routing to provider"
+    );
+
+    let provider = providers.get(&provider_name).ok_or_else(|| {
+        error!(
+            provider = %provider_name,
+            "路由表指定的供應商不存在 / Provider specified in routing table not found"
+        );
+        AppError::internal(format!(
+            "Provider '{}' not found. Available providers: {}",
+            provider_name,
+            providers.keys().cloned().collect::<Vec<_>>().join(", ")
+        ))
+    })?;
+
+    let anthropic_response = match provider {
         ProviderKind::OpenAI(p) => {
-            handle_openai_request(p, request, &config, &original_model).await?
+            handle_openai_request(p, request, &target_model, &original_model).await?
         }
         ProviderKind::ChatGPT(p) => {
-            handle_chatgpt_request(p, request, &config, &original_model).await?
+            handle_chatgpt_request(p, request, &target_model, &original_model).await?
+        }
+        ProviderKind::Anthropic(p) => {
+            // 從 provider config 讀取 supports_streaming，決定是否對後端開啟 stream
+            // Read supports_streaming from provider config to decide whether to enable stream for backend
+            let stream = config
+                .providers
+                .get(&provider_name)
+                .map(|c| c.supports_streaming)
+                .unwrap_or(false);
+
+            handle_anthropic_request(p, request, &target_model, anthropic_version, stream).await?
         }
     };
 
-    // 釋放鎖（提早 drop 以減少鎖持有時間）
-    // Release locks early to minimize hold time
     drop(config);
-    drop(provider);
+    drop(providers);
 
     info!(
         stop_reason = ?anthropic_response.stop_reason,
@@ -159,14 +197,10 @@ pub async fn handle_messages(
         "回傳 Anthropic 回應 / Returning Anthropic response"
     );
 
-    // debug 等級時印出完整的 Anthropic 回應 JSON
-    // Print the full Anthropic response JSON at debug level
     if let Ok(json) = serde_json::to_string_pretty(&anthropic_response) {
         debug!("Anthropic 回應內容 / Anthropic response body:\n{}", json);
     }
 
-    // 根據客戶端是否要求串流，決定回傳 JSON 或模擬 SSE 串流
-    // Return JSON or simulated SSE stream depending on whether client requested streaming
     if wants_stream {
         let events = response_to_sse_events(&anthropic_response).map_err(|e| {
             error!(error = %e, "SSE 事件轉換失敗 / Failed to convert to SSE events");
@@ -190,18 +224,14 @@ pub async fn handle_messages(
 async fn handle_openai_request(
     provider: &OpenAIProvider,
     request: MessagesRequest,
-    config: &Config,
+    target_model: &str,
     original_model: &str,
 ) -> Result<crate::types::anthropic::MessagesResponse, AppError> {
-    let openai_request = convert_request(
-        request,
-        &config.models.mapping,
-        &config.models.default,
-    )
-    .map_err(|e| {
-        error!(error = %e, "請求轉換失敗 / Failed to convert request");
-        AppError::bad_request(format!("Request conversion failed: {}", e))
-    })?;
+    let openai_request = convert_request(request, target_model)
+        .map_err(|e| {
+            error!(error = %e, "請求轉換失敗 / Failed to convert request");
+            AppError::bad_request(format!("Request conversion failed: {}", e))
+        })?;
 
     debug!(
         openai_model = %openai_request.model,
@@ -209,8 +239,6 @@ async fn handle_openai_request(
         "已轉換為 OpenAI 格式 / Converted to OpenAI format"
     );
 
-    // debug 等級時印出完整的 OpenAI 請求 JSON
-    // Print the full OpenAI request JSON at debug level
     if let Ok(json) = serde_json::to_string_pretty(&openai_request) {
         debug!("OpenAI 請求內容 / OpenAI request body:\n{}", json);
     }
@@ -234,21 +262,17 @@ async fn handle_openai_request(
 async fn handle_chatgpt_request(
     provider: &ChatGPTProvider,
     request: MessagesRequest,
-    config: &Config,
+    target_model: &str,
     original_model: &str,
 ) -> Result<crate::types::anthropic::MessagesResponse, AppError> {
     use crate::convert::request_responses::convert_request_to_responses;
     use crate::convert::response_responses::convert_responses_to_anthropic;
 
-    let responses_request = convert_request_to_responses(
-        request,
-        &config.models.mapping,
-        &config.models.default,
-    )
-    .map_err(|e| {
-        error!(error = %e, "Responses API 請求轉換失敗 / Responses API request conversion failed");
-        AppError::bad_request(format!("Responses API conversion failed: {}", e))
-    })?;
+    let responses_request = convert_request_to_responses(request, target_model)
+        .map_err(|e| {
+            error!(error = %e, "Responses API 請求轉換失敗 / Responses API request conversion failed");
+            AppError::bad_request(format!("Responses API conversion failed: {}", e))
+        })?;
 
     debug!(
         model = %responses_request.model,
@@ -256,8 +280,6 @@ async fn handle_chatgpt_request(
         "已轉換為 Responses API 格式 / Converted to Responses API format"
     );
 
-    // debug 等級時印出完整的 Responses API 請求 JSON
-    // Print the full Responses API request JSON at debug level
     if let Ok(json) = serde_json::to_string_pretty(&responses_request) {
         debug!("Responses API 請求內容 / Responses API request body:\n{}", json);
     }
@@ -274,6 +296,41 @@ async fn handle_chatgpt_request(
         error!(error = %e, "Responses API 回應轉換失敗 / Responses API response conversion failed");
         AppError::internal(format!("Responses API response conversion failed: {}", e))
     })
+}
+
+/// 處理 Anthropic 相容供應商的請求轉發（不需格式轉換，只會覆寫目標模型）
+/// Handle request forwarding for Anthropic-compatible provider (no format conversion, only model override)
+async fn handle_anthropic_request(
+    provider: &AnthropicCompatibleProvider,
+    mut request: MessagesRequest,
+    target_model: &str,
+    anthropic_version: &str,
+    stream: bool,
+) -> Result<crate::types::anthropic::MessagesResponse, AppError> {
+    // 覆寫模型為路由後的目標模型
+    // Override model with routed target model
+    request.model = target_model.to_string();
+
+    // 由 Provider 設定檔中的 supports_streaming 控制是否對後端開啟 stream。
+    // For Anthropic-compatible providers, the supports_streaming config flag controls whether
+    // we ask the backend for a streaming response or a single JSON response.
+    //
+    // ⚠️ 目前 adapter 僅支援非串流 JSON 回應（stream=false）；若設為 true，
+    //     後端回傳 SSE 將無法被解析。
+    // ⚠️ Currently the adapter only supports non-streaming JSON responses (stream=false);
+    //     if set to true and the backend returns SSE, it will fail to parse.
+    request.stream = Some(stream);
+
+    provider
+        .messages(&request, anthropic_version)
+        .await
+        .map_err(|e| {
+            error!(
+                error = %e,
+                "Anthropic 相容供應商請求失敗 / Anthropic-compatible provider request failed"
+            );
+            AppError::internal(format!("Anthropic-compatible provider error: {}", e))
+        })
 }
 
 /// 健康檢查端點

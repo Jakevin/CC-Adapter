@@ -117,10 +117,13 @@ impl ChatGPTProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "無法讀取錯誤回應 / Failed to read error body".to_string());
+            // 在錯誤訊息中包含 API URL，方便偵錯 404 / Include API URL in error message for easier 404 debugging
             anyhow::bail!(
-                "ChatGPT Codex 回傳 HTTP {} / ChatGPT Codex returned HTTP {}: {}",
+                "ChatGPT Codex 回傳 HTTP {} (URL: {}) / ChatGPT Codex returned HTTP {} at {}: {}",
                 status.as_u16(),
+                url,
                 status.as_u16(),
+                url,
                 body
             );
         }

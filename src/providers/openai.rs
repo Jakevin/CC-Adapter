@@ -53,17 +53,27 @@ impl OpenAIProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "無法讀取錯誤回應 / Failed to read error body".to_string());
+            // 在錯誤訊息中包含 API URL，方便偵錯 404 / Include API URL in error message for easier 404 debugging
             anyhow::bail!(
-                "供應商回傳 HTTP {} / Provider returned HTTP {}: {}",
+                "供應商回傳 HTTP {} (URL: {}) / Provider returned HTTP {} at {}: {}",
                 status.as_u16(),
+                url,
                 status.as_u16(),
+                url,
                 body
             );
         }
 
-        let body = resp.text().await.context("無法讀取回應內容 / Failed to read response body")?;
+        let body = resp
+            .text()
+            .await
+            .context("無法讀取回應內容 / Failed to read response body")?;
 
-        info!(status = %status, body_len = body.len(), "收到供應商回應 / Received response from provider");
+        info!(
+            status = %status,
+            body_len = body.len(),
+            "收到供應商回應 / Received response from provider"
+        );
         debug!(body = %body, "供應商回應內容 / Provider response body");
 
         let response: ChatCompletionResponse =

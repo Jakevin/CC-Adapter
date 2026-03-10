@@ -165,8 +165,8 @@ pub struct MessagesResponse {
     pub usage: Usage,
 }
 
-/// 回應內容區塊：文字或工具呼叫
-/// Response content block: text or tool_use
+/// 回應內容區塊：文字、工具呼叫或思考區塊
+/// Response content block: text, tool_use, or thinking block
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ResponseContentBlock {
@@ -177,6 +177,14 @@ pub enum ResponseContentBlock {
         id: String,
         name: String,
         input: Value,
+    },
+    /// 思考區塊（部分第三方 Anthropic 相容 API 會回傳）
+    /// Thinking block (some Anthropic-compatible APIs may return this)
+    #[serde(rename = "thinking")]
+    Thinking {
+        thinking: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
     },
 }
 

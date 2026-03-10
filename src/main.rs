@@ -360,12 +360,13 @@ fn restore_claude_settings() {
 async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     let config = config::Config::load(&args)?;
 
+    let provider_names: Vec<String> = config.providers.keys().cloned().collect();
     info!(
         host = %config.server.host,
         port = config.server.port,
-        provider = %config.provider.provider_type,
-        base_url = %config.provider.base_url,
-        default_model = %config.models.default,
+        providers = ?provider_names,
+        default_provider = %config.models.default_provider,
+        default_model = %config.models.default_model,
         "啟動 Claude API Adapter / Starting Claude API Adapter"
     );
 
@@ -397,8 +398,25 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
 
     info!(addr = %addr, "Adapter 正在監聽 / Adapter is listening");
     println!("\n  Claude API Adapter 執行中 / running at http://{}", addr);
-    println!("  供應商 / Provider: {} ({})", config.provider.provider_type, config.provider.base_url);
-    println!("  預設模型 / Default model: {}", config.models.default);
+    println!();
+    for (name, provider_cfg) in &config.providers {
+        let type_info = &provider_cfg.provider_type;
+        let url_info = if provider_cfg.base_url.is_empty() {
+            "(OAuth)".to_string()
+        } else {
+            provider_cfg.base_url.clone()
+        };
+        println!("  供應商 / Provider: {} [{}] ({})", name, type_info, url_info);
+    }
+    println!("  預設供應商 / Default provider: {}", config.models.default_provider);
+    println!("  預設模型 / Default model: {}", config.models.default_model);
+    if !config.models.routing.is_empty() {
+        println!();
+        println!("  模型路由 / Model routing:");
+        for (anthropic, route) in &config.models.routing {
+            println!("    {} → {} ({})", anthropic, route.model, route.provider);
+        }
+    }
     println!("\n  已自動設定 ~/.claude/settings.json 中的 ANTHROPIC_BASE_URL");
     println!("  ANTHROPIC_BASE_URL auto-configured in ~/.claude/settings.json");
     println!("  直接開啟新終端執行 claude 即可使用，無需任何環境變數或 shell hook");

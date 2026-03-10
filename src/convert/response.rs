@@ -189,6 +189,32 @@ pub fn response_to_sse_events(resp: &MessagesResponse) -> Result<Vec<Event>> {
                 });
                 events.push(Event::default().event("content_block_stop").data(block_stop.to_string()));
             }
+            ResponseContentBlock::Thinking { thinking, .. } => {
+                // 將 thinking 區塊以 Anthropic 官方 SSE 格式轉發：
+                // thinking content block（對 UI 隱藏，不再作為一般文字顯示）。
+                // Forward thinking blocks using Anthropic SSE format so UIs can hide them.
+                let block_start = serde_json::json!({
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": { "type": "thinking", "thinking": "" }
+                });
+                events.push(Event::default().event("content_block_start").data(block_start.to_string()));
+
+                if !thinking.is_empty() {
+                    let delta = serde_json::json!({
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": { "type": "thinking_delta", "thinking": thinking }
+                    });
+                    events.push(Event::default().event("content_block_delta").data(delta.to_string()));
+                }
+
+                let block_stop = serde_json::json!({
+                    "type": "content_block_stop",
+                    "index": index
+                });
+                events.push(Event::default().event("content_block_stop").data(block_stop.to_string()));
+            }
         }
     }
 

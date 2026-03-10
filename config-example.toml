@@ -10,40 +10,71 @@ log_level = "info"
 # Log file path (optional): when set, logs are also written to this file — useful for preserving full debug output
 log_file = "adapter.log"
 
-[provider]
-# 供應商類型："openai"、"grok" 或 "chatgpt"
-# Provider type: "openai", "grok", or "chatgpt"
+# ---------------------------------------------------------------------------
+# 供應商配置 / Provider configuration
+# ---------------------------------------------------------------------------
+# 可同時配置多個供應商，每個供應商以 [providers.<名稱>] 定義
+# Multiple providers can be configured, each defined as [providers.<name>]
 #
-# 使用 "chatgpt" 時不需要 api_key，改用 OAuth 認證
-# When using "chatgpt", api_key is not needed — OAuth is used instead
-# 請先執行 `claude-adapter login` 完成 OAuth 登入
-# Run `claude-adapter login` to complete OAuth login first
+# 支援的供應商類型 / Supported provider types:
+#   "chatgpt" — 使用 OAuth 認證（先執行 `claude-adapter login`）
+#               Uses OAuth authentication (run `claude-adapter login` first)
+#   "openai"  — OpenAI API（需要 api_key）
+#               OpenAI API (requires api_key)
+#   "grok"    — Grok/xAI API（需要 api_key）
+#               Grok/xAI API (requires api_key)
+
+[providers.chatgpt]
+type = "chatgpt"
+# ChatGPT 使用 OAuth 認證，不需要 api_key 或 base_url
+# ChatGPT uses OAuth authentication, no api_key or base_url needed
+
+[providers.openai-compatible]
 type = "openai"
-# API 金鑰（也可透過環境變數 ADAPTER_API_KEY 設定）
-# API key (can also be set via ADAPTER_API_KEY env var)
-# 使用 chatgpt 供應商時不需要此設定
-# Not required when using chatgpt provider
+# API 金鑰（也可透過環境變數 ADAPTER_API_KEY 設定，但僅作用於 default_provider）
+# API key (can also be set via ADAPTER_API_KEY env var, but only applies to default_provider)
 api_key = ""
-# 供應商 API 的 Base URL
-# Base URL for the provider API
-# OpenAI:  https://api.openai.com/v1
-# Grok:    https://api.x.ai/v1
-# ChatGPT: （不需要設定，固定為 chatgpt.com/backend-api）
-# ChatGPT: (not needed, fixed to chatgpt.com/backend-api)
-base_url = "https://opencode.ai/zen/go/v1"
-# 供應商是否支援串流 API（若為 false，Adapter 會模擬 SSE 串流回傳給 Claude Code）
-# Whether the provider supports streaming API (if false, Adapter simulates SSE streaming back to Claude Code)
-supports_streaming = true
+# Grok / OpenAI 相容 API 的 Base URL
+# Base URL for Grok / OpenAI-compatible API
+base_url = "https://api.x.ai/v1"
+# 後端是否回傳串流 SSE（通常建議關閉，由 Adapter 統一模擬 SSE）
+# Whether the backend returns streaming SSE (usually keep false and let Adapter simulate SSE)
+supports_streaming = false
+
+[providers.opencode-go-anthropic]
+type = "anthropic-compatible"
+# API 金鑰（也可透過環境變數 ADAPTER_API_KEY 設定，但僅作用於 default_provider）
+# API key (can also be set via ADAPTER_API_KEY env var, but only applies to default_provider)
+api_key = "sk-VJV6SL5qgSjjcBpcArOVC70xUO3aJlQkyoQTofDBxA3x1FpDYR9ZOyYUCvqMr9TT"
+# Grok API 的 Base URL
+# Base URL for Grok API
+base_url = "https://opencode.ai/zen/go"
+supports_streaming = false
+
+# ---------------------------------------------------------------------------
+# 模型配置 / Model configuration
+# ---------------------------------------------------------------------------
 
 [models]
-# 找不到顯式映射時使用的預設模型
-# Default model to use when no explicit mapping is found
-# ChatGPT / OpenAI 建議使用：gpt-5.4
-# Recommended for ChatGPT / OpenAI: gpt-5.4
-default = "gpt-5.4"
+# 找不到路由映射時使用的預設供應商
+# Default provider when no routing match is found
+default_provider = "chatgpt"
+# 找不到路由映射時使用的預設模型
+# Default model when no routing match is found
+default_model = "gpt-5.4"
 
-# 顯式模型映射（Anthropic 模型名稱 → 供應商模型名稱）
-# Explicit model mappings (Anthropic model name -> Provider model name)
-# [models.mapping]
-# "claude-sonnet-4-6" = "gpt-5.4"
-# "claude-opus-4-6" = "gpt-5.4"
+# 模型路由表（Anthropic 模型名稱 → 供應商 + 模型）
+# Claude Code 傳入的模型名稱會根據此表路由到對應的供應商和模型
+# 範例：將特定模型路由到 Grok / Example: route specific model to Grok
+# 若模型名稱包含日期後綴（例如 claude-haiku-4-5-20251001），
+# 建議僅填「型號前綴」作為 key（例如 claude-haiku-4-5），
+# Adapter 會使用最長前綴比對自動套用到所有對應日期版本。
+# Model routing table (Anthropic model name → provider + model)
+# Model names from Claude Code are routed to the corresponding provider and model
+# If model names include a date suffix (e.g. claude-haiku-4-5-20251001),
+# it is recommended to use only the \"family\" prefix (e.g. claude-haiku-4-5) as the key;
+# the adapter will use longest-prefix matching to apply the routing to all dated variants.
+[models.routing]
+"claude-haiku-4-5" = { provider = "openai-compatible", model = "grok-4" }
+"claude-opus-4-6" = { provider = "chatgpt", model = "gpt-5.4" }
+"claude-haiku-4-5" =  { provider = "opencode-go-anthropic", model = "minimax-m2.5" }

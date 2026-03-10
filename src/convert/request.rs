@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::Result;
 
 use crate::types::anthropic::{
@@ -15,15 +13,9 @@ use crate::types::openai::{
 /// Convert an Anthropic Messages API request into an OpenAI Chat Completions API request
 pub fn convert_request(
     req: MessagesRequest,
-    model_mapping: &HashMap<String, String>,
-    default_model: &str,
+    resolved_model: &str,
 ) -> Result<ChatCompletionRequest> {
-    // 查詢模型映射表，找不到則使用預設模型
-    // Look up the model mapping table; fall back to default model if not found
-    let model = model_mapping
-        .get(&req.model)
-        .cloned()
-        .unwrap_or_else(|| default_model.to_string());
+    let model = resolved_model.to_string();
 
     let mut messages = Vec::new();
 
@@ -331,8 +323,7 @@ mod tests {
             metadata: None,
         };
 
-        let mapping = HashMap::new();
-        let result = convert_request(req, &mapping, "gpt-4o").unwrap();
+        let result = convert_request(req, "gpt-4o").unwrap();
 
         assert_eq!(result.model, "gpt-4o");
         assert_eq!(result.messages.len(), 2);
@@ -390,8 +381,7 @@ mod tests {
             metadata: None,
         };
 
-        let mapping = HashMap::new();
-        let result = convert_request(req, &mapping, "gpt-4o").unwrap();
+        let result = convert_request(req, "gpt-4o").unwrap();
 
         // 應產生：user、assistant（含 tool_calls）、tool 三條訊息
         // Should produce: user, assistant (with tool_calls), tool — 3 messages

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::Result;
 
 use crate::types::anthropic::{
@@ -15,13 +13,9 @@ use crate::types::responses::{
 /// Convert an Anthropic Messages API request into an OpenAI Responses API request
 pub fn convert_request_to_responses(
     req: MessagesRequest,
-    model_mapping: &HashMap<String, String>,
-    default_model: &str,
+    resolved_model: &str,
 ) -> Result<ResponsesRequest> {
-    let model = model_mapping
-        .get(&req.model)
-        .cloned()
-        .unwrap_or_else(|| default_model.to_string());
+    let model = resolved_model.to_string();
 
     // 提取系統提示作為 instructions
     // Extract system prompt as instructions
@@ -270,8 +264,7 @@ mod tests {
             metadata: None,
         };
 
-        let mapping = HashMap::new();
-        let result = convert_request_to_responses(req, &mapping, "gpt-5-codex").unwrap();
+        let result = convert_request_to_responses(req, "gpt-5-codex").unwrap();
 
         assert_eq!(result.model, "gpt-5-codex");
         assert_eq!(result.instructions.as_deref(), Some("You are helpful."));
@@ -328,8 +321,7 @@ mod tests {
             metadata: None,
         };
 
-        let mapping = HashMap::new();
-        let result = convert_request_to_responses(req, &mapping, "gpt-5-codex").unwrap();
+        let result = convert_request_to_responses(req, "gpt-5-codex").unwrap();
 
         // 應產生：user message、assistant message、function_call、function_call_output
         // Should produce: user message, assistant message, function_call, function_call_output

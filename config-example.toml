@@ -51,8 +51,8 @@ type = "anthropic-compatible"
 # API 金鑰（也可透過環境變數 ADAPTER_API_KEY 設定，但僅作用於 default_provider）
 # API key (can also be set via ADAPTER_API_KEY env var, but only applies to default_provider)
 api_key = ""
-# Grok API 的 Base URL
-# Base URL for Grok API
+# Provider API 的 Base URL
+# Base URL for Provider API
 base_url = "https://opencode.ai/zen/go"
 supports_streaming = false
 

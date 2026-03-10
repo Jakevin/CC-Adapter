@@ -94,6 +94,8 @@ pub fn save_named(name: &str, data: &TokenData) -> Result<()> {
 
 /// 舊 API（向後相容）：等同 save_named(\"chatgpt\", ...)
 /// Legacy API (backward compatibility): same as save_named(\"chatgpt\", ...)
+#[allow(dead_code)]
+#[deprecated(note = "Use save_named instead")]
 pub fn save(data: &TokenData) -> Result<()> {
     save_named("chatgpt", data)
 }
@@ -127,6 +129,8 @@ pub fn load_named(name: &str) -> Result<Option<TokenData>> {
 
 /// 舊 API（向後相容）：等同 load_named(\"chatgpt\")
 /// Legacy API (backward compatibility): same as load_named(\"chatgpt\")
+#[allow(dead_code)]
+#[deprecated(note = "Use load_named instead")]
 pub fn load() -> Result<Option<TokenData>> {
     load_named("chatgpt")
 }
@@ -157,6 +161,8 @@ pub fn delete_named(name: &str) -> Result<()> {
 
 /// 舊 API（向後相容）：等同 delete_named(\"chatgpt\")
 /// Legacy API (backward compatibility): same as delete_named(\"chatgpt\")
+#[allow(dead_code)]
+#[deprecated(note = "Use delete_named instead")]
 pub fn delete() -> Result<()> {
     delete_named("chatgpt")
 }

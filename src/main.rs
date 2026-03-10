@@ -400,10 +400,11 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
 
     // 啟動 config.toml 檔案監控任務（背景輪詢 mtime）
     // Spawn config.toml file watcher task (background mtime polling)
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let config_path = state.serve_args.config.clone();
     let watcher_state = state.clone();
     tokio::spawn(async move {
-        watch_config(watcher_state, config_path).await;
+        watch_config(watcher_state, config_path, shutdown_rx).await;
     });
 
     info!(addr = %addr, "Adapter 正在監聽 / Adapter is listening");
@@ -438,7 +439,10 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     // 使用 graceful shutdown 確保退出時清理 env 檔案
     // Use graceful shutdown to ensure env file cleanup on exit
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(true);
+        })
         .await?;
 
     // 伺服器關閉後還原 ~/.claude/settings.json
@@ -452,9 +456,162 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
 // config.toml 檔案監控 / config.toml file watcher
 // ---------------------------------------------------------------------------
 
-/// 輪詢 config.toml 的修改時間，偵測到變更時觸發熱重載
-/// Poll config.toml modification time and trigger hot-reload on change
-async fn watch_config(state: std::sync::Arc<server::AppState>, config_path: PathBuf) {
+/// 使用 notify crate 監控 config.toml 的變更，偵測到修改時觸發熱重載
+/// Monitor config.toml for changes using notify crate, trigger hot-reload on modification
+async fn watch_config(
+    state: std::sync::Arc<server::AppState>,
+    config_path: PathBuf,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+
+    // 創建事件通道
+    // Create event channel
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<notify::Result<notify::Event>>();
+
+    // 創建文件系統監控器
+    // Create filesystem watcher
+    let mut watcher = match RecommendedWatcher::new(
+        move |res| {
+            let _ = tx.send(res);
+        },
+        notify::Config::default(),
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "無法啟動文件監控器，退回到輪詢模式 / Failed to start file watcher, falling back to polling"
+            );
+            // 退回到原本的輪詢邏輯
+            // Fall back to original polling logic
+            watch_config_polling(state, config_path, shutdown).await;
+            return;
+        }
+    };
+
+    // 監控配置文件所在目錄（而非單一文件，這樣可以捕獲文件的創建和刪除）
+    // Watch the directory containing the config file (not just the file itself,
+    // so we can capture file creation and deletion)
+    //
+    // 注意：當 config_path 是相對路徑且沒有父目錄（例如 "config.toml"）時，
+    // Path::parent() 會回傳空路徑 ""，這會讓 notify 回報 `No path was found`。
+    // 在這種情況下改為監控目前工作目錄 "."。
+    //
+    // Note: when config_path is a relative path without parent directory
+    // (e.g. "config.toml"), Path::parent() returns an empty path "",
+    // which causes notify to report `No path was found`. In that case
+    // we fall back to watching the current working directory "." instead.
+    let watch_path = match config_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    };
+
+    if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
+        tracing::error!(
+            error = %e,
+            path = %watch_path.display(),
+            "無法監控配置目錄，退回到輪詢模式 / Failed to watch config directory, falling back to polling"
+        );
+        watch_config_polling(state, config_path, shutdown).await;
+        return;
+    }
+
+    info!(
+        path = %config_path.display(),
+        "已啟動文件系統監控 / File system watcher started"
+    );
+
+    // 處理文件系統事件
+    // Handle filesystem events
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    break;
+                }
+            }
+            maybe = rx.recv() => {
+                let Some(res) = maybe else { break; };
+                match res {
+                    Ok(event) => {
+                // 只處理與配置文件相關的事件
+                // Only process events related to the config file
+                if is_config_file_event(&event, &config_path) {
+                    // 添加小延遲，避免編輯器保存時的多個事件
+                    // Add a small delay to avoid multiple events from editor saves
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                    info!("偵測到 config.toml 變更，正在重新載入... / config.toml changed, reloading...");
+
+                    match server::reload_config(&state).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "配置重載失敗，維持目前配置 / Config reload failed, keeping current config"
+                            );
+                            eprintln!("  ✗ 配置重載失敗：{}", e);
+                            eprintln!("  ✗ Config reload failed: {}\n", e);
+                        }
+                    }
+                }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "文件監控錯誤 / File watch error"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 檢查事件是否與目標配置文件相關
+/// Check if an event is related to the target config file
+fn is_config_file_event(event: &notify::Event, config_path: &PathBuf) -> bool {
+    use notify::EventKind;
+
+    // 檢查事件類型：只關心創建、修改、移除
+    // Check event kind: only care about create, modify, remove
+    match event.kind {
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
+            // 檢查路徑是否匹配配置文件
+            // Check if path matches config file
+            //
+            // 若 config_path 是相對路徑，將它轉成以目前工作目錄為基準的實際路徑，
+            // 避免與事件中的絕對路徑比較時無法匹配。
+            //
+            // If config_path is relative, convert it to an absolute path based on
+            // the current working directory so it can match the absolute paths
+            // reported by notify events.
+            let target_path = if config_path.is_absolute() {
+                config_path.clone()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                    .join(config_path)
+            };
+
+            event.paths.iter().any(|p| {
+                p.canonicalize()
+                    .map(|canonical| canonical == target_path)
+                    .unwrap_or(false)
+            })
+        }
+        _ => false,
+    }
+}
+
+/// 備用的輪詢監控方法（當 notify 無法使用時）
+/// Fallback polling method (when notify is unavailable)
+async fn watch_config_polling(
+    state: std::sync::Arc<server::AppState>,
+    config_path: PathBuf,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
     use std::time::Duration;
 
     let mut last_modified = std::fs::metadata(&config_path)
@@ -467,7 +624,14 @@ async fn watch_config(state: std::sync::Arc<server::AppState>, config_path: Path
     interval.tick().await;
 
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    break;
+                }
+            }
+            _ = interval.tick() => {}
+        }
 
         let current_modified = std::fs::metadata(&config_path)
             .and_then(|m| m.modified())
@@ -493,12 +657,39 @@ async fn watch_config(state: std::sync::Arc<server::AppState>, config_path: Path
     }
 }
 
-/// 等待關閉信號（Ctrl+C）
-/// Wait for shutdown signal (Ctrl+C)
+/// 等待關閉信號（Ctrl+C / SIGTERM）
+/// Wait for shutdown signal (Ctrl+C / SIGTERM)
 async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("無法安裝 Ctrl+C 處理器 / Failed to install Ctrl+C handler");
-    eprintln!("\n  收到關閉信號，正在停止伺服器...");
-    eprintln!("  Received shutdown signal, stopping server...");
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        // 同時監聽 SIGINT（通常是 Ctrl+C）與 SIGTERM（外部終止）
+        // Listen to both SIGINT (typically Ctrl+C) and SIGTERM (external termination)
+        let mut sigint = signal(SignalKind::interrupt())
+            .expect("無法安裝 SIGINT 處理器 / Failed to install SIGINT handler");
+        let mut sigterm = signal(SignalKind::terminate())
+            .expect("無法安裝 SIGTERM 處理器 / Failed to install SIGTERM handler");
+
+        tokio::select! {
+            _ = sigint.recv() => {
+                eprintln!("\n  收到 SIGINT（Ctrl+C），正在停止伺服器...");
+                eprintln!("  Received SIGINT (Ctrl+C), stopping server...");
+            }
+            _ = sigterm.recv() => {
+                eprintln!("\n  收到 SIGTERM，正在停止伺服器...");
+                eprintln!("  Received SIGTERM, stopping server...");
+            }
+        }
+        return;
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("無法安裝 Ctrl+C 處理器 / Failed to install Ctrl+C handler");
+        eprintln!("\n  收到關閉信號，正在停止伺服器...");
+        eprintln!("  Received shutdown signal, stopping server...");
+    }
 }

@@ -59,6 +59,16 @@ api_key = ""
 base_url = "https://opencode.ai/zen/go/v1"
 supports_streaming = false
 
+[providers.omlx]
+type = "openai"
+# API 金鑰（也可透過環境變數 ADAPTER_API_KEY 設定，但僅作用於 default_provider）
+# API key (can also be set via ADAPTER_API_KEY env var, but only applies to default_provider)
+api_key = "abc1234"
+# Grok API 的 Base URL
+# Base URL for Grok API
+base_url = "http://127.0.0.1/v1"
+supports_streaming = true
+
 # ---------------------------------------------------------------------------
 # 模型配置 / Model configuration
 # ---------------------------------------------------------------------------

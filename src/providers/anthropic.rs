@@ -28,7 +28,7 @@ impl AnthropicCompatibleProvider {
         request: &MessagesRequest,
         anthropic_version: &str,
     ) -> Result<MessagesResponse> {
-        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+        let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
 
         debug!(
             model = %request.model,

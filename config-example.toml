@@ -56,7 +56,7 @@ type = "anthropic-compatible"
 api_key = ""
 # Provider API 的 Base URL
 # Base URL for Provider API
-base_url = "https://opencode.ai/zen/go"
+base_url = "https://opencode.ai/zen/go/v1"
 supports_streaming = false
 
 # ---------------------------------------------------------------------------

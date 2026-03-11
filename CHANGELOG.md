@@ -1,3 +1,17 @@
+## v0.5.2
+
+### 變更紀錄（繁體中文）
+
+- **Anthropic-compatible base_url 更直覺**：`anthropic-compatible` 供應商的 `base_url` 現在可直接填到 API 前綴（例如 `.../v1`），程式會以 `.../messages` 作為端點組合（避免重複 `/v1`）。
+- **更新範例設定**：`config-example.toml` 的 `opencode-go-anthropic.base_url` 更新為包含 `/v1` 的範例。
+
+---
+
+### Change Log (English)
+
+- **More intuitive anthropic-compatible base_url**: For `anthropic-compatible` providers, `base_url` can now include the API prefix (e.g. `.../v1`), and the adapter will POST to `.../messages` (avoids duplicating `/v1`).
+- **Updated example config**: `config-example.toml` now uses a `/v1` base URL for `opencode-go-anthropic`.
+
 ## v0.5.1
 
 ### 變更紀錄（繁體中文）

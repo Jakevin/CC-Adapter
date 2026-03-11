@@ -65,6 +65,8 @@ cd claude-adapter
 
 压缩包内含可执行文件与 `config-example.toml` 模板。
 
+Windows 请下载 `claude-adapter-windows-amd64.zip` 并解压（包含 `claude-adapter.exe` 与 `config-example.toml`）。
+
 **方式 B：从源码编译**
 
 ```bash

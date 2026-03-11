@@ -67,6 +67,8 @@ cd claude-adapter
 
 The archive includes the binary and a `config-example.toml` template.
 
+On Windows, download `claude-adapter-windows-amd64.zip` and extract it (it contains `claude-adapter.exe` and `config-example.toml`).
+
 **Option B: Build from source**
 
 ```bash

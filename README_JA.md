@@ -68,6 +68,8 @@ cd claude-adapter
 
 アーカイブにはバイナリと `config-example.toml` のテンプレートが含まれています。
 
+Windows の場合は `claude-adapter-windows-amd64.zip` をダウンロードして展開してください（`claude-adapter.exe` と `config-example.toml` が含まれます）。
+
 **方法 B: ソースからビルド**
 
 ```bash

@@ -24,6 +24,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: claude-adapter-darwin-arm64.tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: claude-adapter-windows-amd64.zip
 
     runs-on: ${{ matrix.os }}
 
@@ -46,12 +49,22 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package
+      - name: Package (tar.gz)
+        if: matrix.os != 'windows-latest'
         run: |
           mkdir -p release/claude-adapter
           cp target/${{ matrix.target }}/release/claude-adapter release/claude-adapter/
           cp config-example.toml release/claude-adapter/
           tar -czf ${{ matrix.artifact }} -C release claude-adapter
+
+      - name: Package (zip)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release/claude-adapter | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/claude-adapter.exe" "release/claude-adapter/"
+          Copy-Item "config-example.toml" "release/claude-adapter/"
+          Compress-Archive -Path "release/claude-adapter/*" -DestinationPath "${{ matrix.artifact }}" -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -71,4 +84,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: "*.tar.gz"
+          files: |
+            *.tar.gz
+            *.zip

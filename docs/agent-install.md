@@ -6,13 +6,15 @@ Repository: https://github.com/Jakevin/CC-Adapter
 
 ## Prerequisites
 
-- macOS (arm64 / amd64) or Linux (arm64 / amd64)
+- macOS (arm64 / amd64), Linux (arm64 / amd64), or Windows (amd64)
 - An API key from OpenAI, Grok (xAI), or any OpenAI-compatible provider
   - OR a ChatGPT Plus/Pro subscription (uses OAuth, no API key needed)
 
 ## Step 1: Download and Extract
 
-Detect the platform and download the correct binary:
+Detect the platform and download the correct binary.
+
+### macOS / Linux
 
 ```bash
 # Detect OS and architecture
@@ -44,12 +46,36 @@ If `~/.local/bin` is not in PATH, add it:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
+### Windows (PowerShell)
+
+Download the latest Windows build and extract it to a folder in PATH (example uses `C:\Tools\claude-adapter`):
+
+```powershell
+$ErrorActionPreference = "Stop"
+
+$dest = "C:\Tools\claude-adapter"
+New-Item -ItemType Directory -Force -Path $dest | Out-Null
+
+$zip = Join-Path $env:TEMP "claude-adapter.zip"
+Invoke-WebRequest `
+  -Uri "https://github.com/Jakevin/CC-Adapter/releases/latest/download/claude-adapter-windows-amd64.zip" `
+  -OutFile $zip
+
+Expand-Archive -Path $zip -DestinationPath $dest -Force
+Remove-Item $zip -Force
+
+# Verify
+& (Join-Path $dest "claude-adapter.exe") --help
+```
+
 ## Step 2: Create Config
 
 ```bash
 mkdir -p ~/.config/claude-adapter
 cp ~/.local/bin/config-example.toml ~/.config/claude-adapter/config.toml
 ```
+
+On Windows, you can put `config.toml` anywhere and pass it via `--config` in Step 3.
 
 Edit `~/.config/claude-adapter/config.toml`. The user MUST provide their own values for the following fields. Ask the user which provider they want to use:
 

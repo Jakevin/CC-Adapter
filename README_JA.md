@@ -34,8 +34,9 @@ Claude Code ──[Anthropic API]──▶ Adapter (localhost) ─┤
 - 画像入力（base64）
 - モデルマッピングの設定
 - SSE ストリーミングのシミュレーション（非ストリーミングプロバイダー向け）
+- 任意：`[server] claude_stream_idle_timeout_ms` により Claude Code 設定へ `CLAUDE_STREAM_IDLE_TIMEOUT_MS` を注入（終了時にバックアップから復元）
 - ファイルシステムウォッチャーによる設定のホットリロード
-- SIGINT / SIGTERM での Graceful シャットダウンと設定の復元
+- SIGINT / SIGTERM / SIGHUP での Graceful シャットダウンと設定の復元
 - ChatGPT 用 OAuth 認証（PKCE フロー）
 
 ## AI エージェント向けインストール
@@ -91,6 +92,7 @@ port = 8080
 log_level = "info"
 log_file = "adapter.log"
 # log_file_enabled = true   # false にするとログをファイルに書き出さない（既定: true）
+# claude_stream_idle_timeout_ms = 300000   # 任意: ms を ~/.claude/settings.json の env に書き込み、終了時に復元。既定 300000（5 分）。0 で注入・バックアップをスキップ
 
 [providers.chatgpt]
 type = "chatgpt"
@@ -110,7 +112,9 @@ type = "anthropic-compatible"
 api_key = "sk-your-key"
 # Anthropic 互換 Messages API の Base URL
 base_url = "https://opencode.ai/zen/go"
-# 多くの Anthropic 互換バックエンドは非ストリーミング JSON を返す；SSE 専用でない限り false のまま
+# false = バックエンドに単一 JSON を要求（対応している場合は推奨）。
+# true = ストリーミングを要求；アダプターは Anthropic Messages の SSE を 1 つのレスポンスに集約する。
+# バックエンドが stream=false を無視して SSE を返す場合も、可能な限り同様に集約する。
 supports_streaming = false
 
 [models]
@@ -206,13 +210,13 @@ ADAPTER_API_KEY=sk-xxx ./target/release/claude-adapter
 
 ### 5. Claude Code で利用する
 
-アダプター起動時に `~/.claude/settings.json` を自動設定します。新しいターミナルを開いて次を実行するだけです：
+起動時に `~/.claude/settings.json` を更新します。少なくともアダプター向けの `ANTHROPIC_BASE_URL` を設定し、`[server] claude_stream_idle_timeout_ms = 0` でない限り、長めのストリームアイドルタイムアウト用に `CLAUDE_STREAM_IDLE_TIMEOUT_MS`（既定 300000 ms）も書き込みます。手動の環境変数やシェルフックは不要です。Graceful 終了時にバックアップからこれらのキーを復元します。
+
+その後、新しいターミナルを開いて次を実行します：
 
 ```bash
 claude
 ```
-
-環境変数やシェルフックは不要です。アダプター停止時には設定が自動で元に戻ります。
 
 ## プロバイダー別の例
 
@@ -361,6 +365,7 @@ curl http://127.0.0.1:8080/health
 
 ## 現在の制限事項
 
+- Anthropic 互換バックエンドの**ストリーミング**レスポンス：アダプターは **テキスト** の SSE delta を 1 回の応答に集約します。ツール呼び出しのストリーミングはまだ完全には再構成していません。
 - サードパーティの Anthropic 互換 API からの thinking ブロックは、SSE 内で適切な `thinking` コンテンツブロックとして転送されます。
   - 通常のテキストとしては表示されませんが、一部の UI やツールでは非表示または無視する場合があります。
 - ChatGPT OAuth は公式 Codex CLI と同じフローを使用しており、個人利用を想定しています。
@@ -382,6 +387,7 @@ src/
 │   ├── openai.rs                # OpenAI Chat Completions API serde 型
 │   └── responses.rs             # OpenAI Responses API serde 型
 ├── convert/
+│   ├── anthropic_sse.rs          # Anthropic Messages SSE を 1 つの MessagesResponse に集約
 │   ├── request.rs                # Anthropic → Chat Completions リクエスト変換
 │   ├── response.rs               # Chat Completions → Anthropic レスポンス変換
 │   ├── request_responses.rs      # Anthropic → Responses API リクエスト変換

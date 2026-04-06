@@ -1,6 +1,6 @@
 [package]
 name = "claude-adapter"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 description = "API adapter that lets Claude Code use OpenAI/Grok/ChatGPT providers"
 

@@ -217,9 +217,9 @@ ADAPTER_API_KEY=sk-xxx claude-adapter serve --config ~/.config/claude-adapter/co
 
 The adapter will:
 1. Start listening on `http://127.0.0.1:8080`
-2. Automatically configure `~/.claude/settings.json` with `ANTHROPIC_BASE_URL`
+2. Automatically configure `~/.claude/settings.json` with `ANTHROPIC_BASE_URL`, and (unless `[server] claude_stream_idle_timeout_ms = 0` in config) with `CLAUDE_STREAM_IDLE_TIMEOUT_MS` for a longer stream idle timeout (default 300000 ms)
 3. Hot-reload `config.toml` changes automatically while running
-4. Restore the original settings when stopped (Ctrl+C / SIGTERM)
+4. Restore the previous `env` values from backup when stopped gracefully (Ctrl+C / SIGTERM / SIGHUP)
 
 ## Step 4: Verify
 

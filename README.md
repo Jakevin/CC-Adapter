@@ -33,8 +33,9 @@ The adapter runs a local HTTP server that:
 - Image inputs (base64)
 - Configurable model mapping
 - SSE streaming simulation (for non-streaming providers)
+- Optional `CLAUDE_STREAM_IDLE_TIMEOUT_MS` in Claude Code settings (via `[server] claude_stream_idle_timeout_ms`, restored on shutdown)
 - Real-time config hot reload with filesystem watcher
-- Graceful shutdown with settings restoration on SIGINT / SIGTERM
+- Graceful shutdown with settings restoration on SIGINT / SIGTERM / SIGHUP
 - OAuth authentication for ChatGPT (PKCE flow)
 
 ## Installation for AI Agents
@@ -90,6 +91,7 @@ port = 8080
 log_level = "info"
 log_file = "adapter.log"
 # log_file_enabled = true   # set to false to disable writing logs to file (default: true)
+# claude_stream_idle_timeout_ms = 300000   # optional: ms written to ~/.claude/settings.json env; restored on shutdown. Default 300000 (5 min). Use 0 to skip injection and backup.
 
 [providers.chatgpt]
 type = "chatgpt"
@@ -109,7 +111,9 @@ type = "anthropic-compatible"
 api_key = "sk-your-key"
 # Base URL for Anthropic-compatible Messages API
 base_url = "https://opencode.ai/zen/go"
-# Most Anthropic-compatible backends support non-streaming JSON responses; keep false unless you know it's SSE-only
+# false = ask the backend for a single JSON object (preferred when supported).
+# true = ask for streaming; the adapter aggregates Anthropic Messages SSE into one response.
+# If the backend returns SSE anyway (e.g. ignores stream=false), the adapter still aggregates when possible.
 supports_streaming = false
 
 [models]
@@ -204,13 +208,13 @@ ADAPTER_API_KEY=sk-xxx ./target/release/claude-adapter
 
 ### 5. Use with Claude Code
 
-The adapter automatically configures `~/.claude/settings.json` on startup — just open a new terminal and run:
+On startup the adapter updates `~/.claude/settings.json` with at least `ANTHROPIC_BASE_URL` pointing at the adapter, and (unless `[server] claude_stream_idle_timeout_ms = 0`) `CLAUDE_STREAM_IDLE_TIMEOUT_MS` for a longer stream idle timeout (default 300000 ms). No manual env vars or shell hooks are required. On graceful exit, previous values are restored from a backup (same keys).
+
+Then open a new terminal and run:
 
 ```bash
 claude
 ```
-
-No environment variables or shell hooks needed. When the adapter stops, the settings are automatically restored.
 
 ## Provider Examples
 
@@ -359,6 +363,7 @@ curl http://127.0.0.1:8080/health
 
 ## Current Limitations
 
+- Anthropic-compatible **streaming** responses: the adapter aggregates **text** deltas from Anthropic Messages SSE into a single reply. Tool-use streaming from SSE is not fully reconstructed yet.
 - Thinking blocks from third-party Anthropic-compatible APIs are forwarded as proper `thinking` content blocks in SSE.
   - They are not shown as normal text, but some UIs or tools may choose to hide or ignore them.
 - ChatGPT OAuth uses the same flow as the official Codex CLI, for personal use only.
@@ -380,6 +385,7 @@ src/
 │   ├── openai.rs                 # OpenAI Chat Completions API serde types
 │   └── responses.rs              # OpenAI Responses API serde types
 ├── convert/
+│   ├── anthropic_sse.rs          # Aggregate Anthropic Messages SSE into one MessagesResponse
 │   ├── request.rs                # Anthropic → Chat Completions request conversion
 │   ├── response.rs               # Chat Completions → Anthropic response conversion
 │   ├── request_responses.rs      # Anthropic → Responses API request conversion

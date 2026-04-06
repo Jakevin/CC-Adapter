@@ -121,6 +121,12 @@ pub struct ServerConfig {
     #[serde(default = "default_log_file_enabled")]
     #[allow(dead_code)]
     pub log_file_enabled: bool,
+    /// 寫入 ~/.claude/settings.json 的 `CLAUDE_STREAM_IDLE_TIMEOUT_MS`（毫秒），停止 adapter 時還原。
+    /// 預設 300000（5 分鐘）；設為 0 表示不注入、不備份還原此變數。
+    /// Writes `CLAUDE_STREAM_IDLE_TIMEOUT_MS` to ~/.claude/settings.json env; restored on shutdown.
+    /// Default 300000 (5 min); 0 = do not inject or backup/restore this variable.
+    #[serde(default = "default_claude_stream_idle_timeout_ms")]
+    pub claude_stream_idle_timeout_ms: u64,
 }
 
 fn default_log_level() -> String {
@@ -129,6 +135,10 @@ fn default_log_level() -> String {
 
 fn default_log_file_enabled() -> bool {
     true
+}
+
+fn default_claude_stream_idle_timeout_ms() -> u64 {
+    300_000
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -303,6 +313,7 @@ impl Config {
                     log_level: "info".to_string(),
                     log_file: None,
                     log_file_enabled: true,
+                    claude_stream_idle_timeout_ms: default_claude_stream_idle_timeout_ms(),
                 },
                 providers: HashMap::new(),
                 models: ModelsConfig {

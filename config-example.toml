@@ -12,6 +12,9 @@ log_file = "adapter.log"
 # 是否啟用寫入日誌檔案（預設 true）：設為 false 時，即使有設定 log_file 也不會寫入檔案
 # Whether to enable writing logs to file (default true): when false, logs are not written to file even if log_file is set
 log_file_enabled = false
+# Claude Code 串流閒置逾時（毫秒）：寫入 ~/.claude/settings.json 的 env，停止 adapter 時與 ANTHROPIC_BASE_URL 一併還原。預設 300000（5 分鐘）。設為 0 則不注入、不備份還原此變數。
+# Claude Code stream idle timeout (ms): written to ~/.claude/settings.json env; restored on shutdown with ANTHROPIC_BASE_URL. Default 300000 (5 min). Use 0 to skip.
+# claude_stream_idle_timeout_ms = 300000
 
 # ---------------------------------------------------------------------------
 # 供應商配置 / Provider configuration

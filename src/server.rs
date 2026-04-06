@@ -315,10 +315,8 @@ async fn handle_anthropic_request(
     // For Anthropic-compatible providers, the supports_streaming config flag controls whether
     // we ask the backend for a streaming response or a single JSON response.
     //
-    // ⚠️ 目前 adapter 僅支援非串流 JSON 回應（stream=false）；若設為 true，
-    //     後端回傳 SSE 將無法被解析。
-    // ⚠️ Currently the adapter only supports non-streaming JSON responses (stream=false);
-    //     if set to true and the backend returns SSE, it will fail to parse.
+    // 若後端在 stream=true 時回傳 Anthropic Messages SSE，provider 會聚合為單一 JSON 回應。
+    // When stream=true, if the backend returns Anthropic Messages SSE, the provider aggregates it into one JSON response.
     request.stream = Some(stream);
 
     provider

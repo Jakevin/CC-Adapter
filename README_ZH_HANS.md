@@ -33,6 +33,9 @@ Claude Code ──[Anthropic API]──▶ Adapter (localhost) ─┤
 - 图片输入（base64）
 - 可配置的模型映射
 - SSE 流式模拟（用于不支持流式的供应商）
+- 可选：通过 `[server] claude_stream_idle_timeout_ms` 写入 Claude Code 的 `CLAUDE_STREAM_IDLE_TIMEOUT_MS`（退出时从备份还原）
+- 配置文件热重载（文件监听）
+- 优雅退出时还原 `~/.claude/settings.json`（SIGINT / SIGTERM / SIGHUP）
 - ChatGPT OAuth 认证（PKCE 流程）
 
 ## AI Agent 安装指引
@@ -88,6 +91,7 @@ port = 8080
 log_level = "info"
 log_file = "adapter.log"
 # log_file_enabled = true   # 设为 false 可关闭写入日志文件（默认 true）
+# claude_stream_idle_timeout_ms = 300000   # 可选：毫秒，写入 ~/.claude/settings.json；退出时还原。默认 300000（5 分钟）。设为 0 则不注入、不备份还原。
 
 [providers.chatgpt]
 type = "chatgpt"
@@ -107,7 +111,9 @@ type = "anthropic-compatible"
 api_key = "sk-your-key"
 # Anthropic 兼容 Messages API 的 Base URL
 base_url = "https://opencode.ai/zen/go"
-# 大多数 Anthropic 兼容后端支持非流式 JSON 响应，建议保持 false
+# false = 请求后端返回单个 JSON（后端支持时建议）。
+# true = 请求流式；适配器会将 Anthropic Messages 的 SSE 聚合成单次响应。
+# 若后端仍返回 SSE（例如忽略 stream=false），适配器在可行时同样聚合。
 supports_streaming = false
 
 [models]
@@ -201,13 +207,13 @@ ADAPTER_API_KEY=sk-xxx ./target/release/claude-adapter
 
 ### 5. 搭配 Claude Code 使用
 
-Adapter 启动时会自动配置 `~/.claude/settings.json`——只需打开新终端运行：
+启动时会更新 `~/.claude/settings.json`：至少写入指向适配器的 `ANTHROPIC_BASE_URL`；除非 `[server] claude_stream_idle_timeout_ms = 0`，还会写入较长流式空闲超时的 `CLAUDE_STREAM_IDLE_TIMEOUT_MS`（默认 300000 毫秒）。无需手动设置环境变量或 shell hook。优雅退出时会按备份还原上述键的先前值。
+
+然后打开新终端运行：
 
 ```bash
 claude
 ```
-
-不需要设置环境变量或 shell hook。Adapter 停止时会自动还原设置。
 
 ## 供应商示例
 
@@ -356,6 +362,7 @@ curl http://127.0.0.1:8080/health
 
 ## 当前限制
 
+- Anthropic 兼容后端的**流式**响应：适配器会将 **文本** 的 SSE delta 聚合成单次回复；工具调用的流式尚未完整还原。
 - 来自第三方 Anthropic 兼容 API 的 thinking 块会作为正式的 `thinking` 内容块通过 SSE 转发，  
   具体是否显示由上游 UI 或工具决定，不再当作普通文本插入到最终回答中。
 - ChatGPT OAuth 使用与官方 Codex CLI 相同的流程，仅限个人使用。
@@ -377,6 +384,7 @@ src/
 │   ├── openai.rs                 # OpenAI Chat Completions API serde 类型
 │   └── responses.rs              # OpenAI Responses API serde 类型
 ├── convert/
+│   ├── anthropic_sse.rs          # 将 Anthropic Messages SSE 聚合成单个 MessagesResponse
 │   ├── request.rs                # Anthropic → Chat Completions 请求转换
 │   ├── response.rs               # Chat Completions → Anthropic 响应转换
 │   ├── request_responses.rs      # Anthropic → Responses API 请求转换

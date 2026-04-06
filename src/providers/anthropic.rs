@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use reqwest::Client;
 use tracing::{debug, info};
 
+use crate::convert::anthropic_sse::parse_anthropic_messages_sse;
 use crate::types::anthropic::{MessagesRequest, MessagesResponse};
 
 /// Anthropic 相容供應商的 HTTP 客戶端（API 介面與 Anthropic 相同，只是 base_url 不同）
@@ -83,18 +84,37 @@ impl AnthropicCompatibleProvider {
             );
         }
 
-        // 解析失敗時，把原始 body 一併寫進錯誤，方便比對實際回傳格式
-        // When parsing fails, include raw body in the error to inspect actual response shape
-        let response: MessagesResponse = serde_json::from_str(&body).map_err(|e| {
-            anyhow::anyhow!(
-                "無法解析 Anthropic 相容供應商回應: {}，原始回應內容 / Failed to parse Anthropic-compatible provider response: {}. Raw body: {}",
-                e,
-                e,
-                body
-            )
-        })?;
-
-        Ok(response)
+        // 非串流時為單一 JSON；若後端仍回傳 SSE（例如忽略 stream=false），改走 SSE 聚合
+        // Non-streaming returns a single JSON object; if the backend still returns SSE (e.g. ignores stream=false), aggregate SSE
+        match serde_json::from_str::<MessagesResponse>(&body) {
+            Ok(response) => Ok(response),
+            Err(e) => {
+                if looks_like_anthropic_messages_sse(&body) {
+                    parse_anthropic_messages_sse(&body).map_err(|e2| {
+                        anyhow::anyhow!(
+                            "無法解析 Anthropic 相容供應商 SSE: {}，原始回應內容 / Failed to parse Anthropic-compatible provider SSE: {}. Raw body: {}",
+                            e2,
+                            e2,
+                            body
+                        )
+                    })
+                } else {
+                    Err(anyhow::anyhow!(
+                        "無法解析 Anthropic 相容供應商回應: {}，原始回應內容 / Failed to parse Anthropic-compatible provider response: {}. Raw body: {}",
+                        e,
+                        e,
+                        body
+                    ))
+                }
+            }
+        }
     }
 }
 
+/// 粗略偵測是否為 Anthropic Messages 的 SSE（event/data 行 + 典型事件名）
+/// Heuristic detection for Anthropic Messages SSE (event/data lines + typical event names)
+fn looks_like_anthropic_messages_sse(body: &str) -> bool {
+    body.contains("event:")
+        && body.contains("data:")
+        && (body.contains("message_start") || body.contains("content_block_delta"))
+}

@@ -257,13 +257,33 @@ fn claude_settings_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude").join("settings.json"))
 }
 
-/// 備份檔路徑：~/.claude-adapter/base_url_backup.json
+/// 備份檔路徑：~/.claude-adapter/base_url_backup.json（內含 ANTHROPIC_BASE_URL 與可選的 CLAUDE_STREAM_IDLE_TIMEOUT_MS）
 fn backup_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".claude-adapter").join("base_url_backup.json"))
 }
 
-/// 將 ANTHROPIC_BASE_URL 注入 ~/.claude/settings.json，讓 Claude Code 自動使用本地代理
-fn inject_claude_settings(host: &str, port: u16) {
+/// 依備份區段還原單一 `env` 鍵（`had_value: true` 寫回 `old_value`，`false` 則移除）
+fn restore_env_from_backup_section(
+    env: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    section: Option<&serde_json::Value>,
+) {
+    let Some(s) = section else { return };
+    match s.get("had_value").and_then(|v| v.as_bool()) {
+        Some(true) => {
+            if let Some(old) = s.get("old_value") {
+                env.insert(key.to_string(), old.clone());
+            }
+        }
+        Some(false) => {
+            env.remove(key);
+        }
+        _ => {}
+    }
+}
+
+/// 將 `ANTHROPIC_BASE_URL`（及可選的 `CLAUDE_STREAM_IDLE_TIMEOUT_MS`）注入 ~/.claude/settings.json
+fn inject_claude_settings(host: &str, port: u16, stream_idle_timeout_ms: u64) {
     let Some(path) = claude_settings_path() else { return };
 
     let mut settings: serde_json::Value = if path.exists() {
@@ -278,20 +298,38 @@ fn inject_claude_settings(host: &str, port: u16) {
     let connect_host = if host == "0.0.0.0" { "127.0.0.1" } else { host };
     let proxy_url = format!("http://{}:{}", connect_host, port);
 
-    // 備份當前的 ANTHROPIC_BASE_URL（若有），供關閉時還原
-    let old_value = settings
+    // 備份啟動前的 env 值，供關閉時還原
+    let old_base = settings
         .get("env")
         .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
+        .cloned();
+    let old_stream = settings
+        .get("env")
+        .and_then(|env| env.get("CLAUDE_STREAM_IDLE_TIMEOUT_MS"))
         .cloned();
 
     if let Some(bp) = backup_path() {
         if let Some(parent) = bp.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let backup = serde_json::json!({
-            "had_value": old_value.is_some(),
-            "old_value": old_value,
-        });
+        let mut backup_map = serde_json::Map::new();
+        backup_map.insert(
+            "anthropic_base_url".to_string(),
+            serde_json::json!({
+                "had_value": old_base.is_some(),
+                "old_value": old_base,
+            }),
+        );
+        if stream_idle_timeout_ms > 0 {
+            backup_map.insert(
+                "claude_stream_idle_timeout_ms".to_string(),
+                serde_json::json!({
+                    "had_value": old_stream.is_some(),
+                    "old_value": old_stream,
+                }),
+            );
+        }
+        let backup = serde_json::Value::Object(backup_map);
         if let Ok(json) = serde_json::to_string_pretty(&backup) {
             let _ = std::fs::write(&bp, json);
         }
@@ -301,6 +339,10 @@ fn inject_claude_settings(host: &str, port: u16) {
         settings["env"] = serde_json::json!({});
     }
     settings["env"]["ANTHROPIC_BASE_URL"] = serde_json::Value::String(proxy_url.clone());
+    if stream_idle_timeout_ms > 0 {
+        settings["env"]["CLAUDE_STREAM_IDLE_TIMEOUT_MS"] =
+            serde_json::Value::String(stream_idle_timeout_ms.to_string());
+    }
 
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -325,11 +367,12 @@ fn inject_claude_settings(host: &str, port: u16) {
     info!(
         path = %path.display(),
         url = %proxy_url,
-        "已注入 ANTHROPIC_BASE_URL 至 Claude settings.json / Injected ANTHROPIC_BASE_URL into Claude settings.json"
+        stream_idle_ms = stream_idle_timeout_ms,
+        "已注入 Claude Code env 至 settings.json / Injected Claude Code env into settings.json"
     );
 }
 
-/// 還原 ~/.claude/settings.json 中的 ANTHROPIC_BASE_URL
+/// 還原 ~/.claude/settings.json 中由本程式注入的 `env` 鍵
 fn restore_claude_settings() {
     let Some(path) = claude_settings_path() else { return };
     let Some(bp) = backup_path() else { return };
@@ -347,13 +390,22 @@ fn restore_claude_settings() {
 
     if let Some(env) = settings.get_mut("env").and_then(|v| v.as_object_mut()) {
         match &backup {
-            Some(b) if b.get("had_value").and_then(|v| v.as_bool()) == Some(true) => {
-                if let Some(old) = b.get("old_value") {
-                    env.insert("ANTHROPIC_BASE_URL".to_string(), old.clone());
-                }
-            }
-            _ => {
+            None => {
+                // 舊行為：備份遺失時仍移除 ANTHROPIC_BASE_URL；不動 CLAUDE_STREAM_IDLE_TIMEOUT_MS
                 env.remove("ANTHROPIC_BASE_URL");
+            }
+            Some(b) => {
+                // 新版備份：anthropic_base_url + 可選 claude_stream_idle_timeout_ms
+                // 舊版備份：僅頂層 had_value / old_value → 只對應 ANTHROPIC_BASE_URL
+                let anthropic_section = b.get("anthropic_base_url").or_else(|| {
+                    b.get("had_value")
+                        .is_some()
+                        .then_some(b)
+                });
+                restore_env_from_backup_section(env, "ANTHROPIC_BASE_URL", anthropic_section);
+
+                let stream_section = b.get("claude_stream_idle_timeout_ms");
+                restore_env_from_backup_section(env, "CLAUDE_STREAM_IDLE_TIMEOUT_MS", stream_section);
             }
         }
 
@@ -373,10 +425,10 @@ fn restore_claude_settings() {
     let _ = std::fs::remove_file(&bp);
 
     eprintln!(
-        "\n  已還原 ~/.claude/settings.json — ANTHROPIC_BASE_URL 已移除"
+        "\n  已還原 ~/.claude/settings.json — ANTHROPIC_BASE_URL（與可選的 CLAUDE_STREAM_IDLE_TIMEOUT_MS）已還原"
     );
     eprintln!(
-        "  Restored ~/.claude/settings.json — ANTHROPIC_BASE_URL removed\n"
+        "  Restored ~/.claude/settings.json — ANTHROPIC_BASE_URL (and optional CLAUDE_STREAM_IDLE_TIMEOUT_MS) restored\n"
     );
 }
 
@@ -411,7 +463,11 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
     // 確保 Claude Code onboarding 已略過 + 注入 ANTHROPIC_BASE_URL
     // Ensure Claude Code onboarding is skipped + inject ANTHROPIC_BASE_URL
     ensure_claude_onboarding();
-    inject_claude_settings(&config.server.host, config.server.port);
+    inject_claude_settings(
+        &config.server.host,
+        config.server.port,
+        config.server.claude_stream_idle_timeout_ms,
+    );
 
     // 啟動 config.toml 檔案監控任務（背景輪詢 mtime）
     // Spawn config.toml file watcher task (background mtime polling)
@@ -443,8 +499,26 @@ async fn run_serve(args: ServeArgs) -> anyhow::Result<()> {
             println!("    {} → {} ({})", anthropic, route.model, route.provider);
         }
     }
-    println!("\n  已自動設定 ~/.claude/settings.json 中的 ANTHROPIC_BASE_URL");
-    println!("  ANTHROPIC_BASE_URL auto-configured in ~/.claude/settings.json");
+    println!("\n  已自動設定 ~/.claude/settings.json：ANTHROPIC_BASE_URL{}", if config.server.claude_stream_idle_timeout_ms > 0 {
+        "、CLAUDE_STREAM_IDLE_TIMEOUT_MS"
+    } else {
+        ""
+    });
+    println!(
+        "  Auto-configured ~/.claude/settings.json: ANTHROPIC_BASE_URL{}",
+        if config.server.claude_stream_idle_timeout_ms > 0 {
+            ", CLAUDE_STREAM_IDLE_TIMEOUT_MS"
+        } else {
+            ""
+        }
+    );
+    if config.server.claude_stream_idle_timeout_ms > 0 {
+        println!(
+            "  （串流閒置逾時 {} ms / stream idle timeout {} ms）",
+            config.server.claude_stream_idle_timeout_ms,
+            config.server.claude_stream_idle_timeout_ms
+        );
+    }
     println!("  直接開啟新終端執行 claude 即可使用，無需任何環境變數或 shell hook");
     println!("  Just open a new terminal and run `claude` — no env vars or shell hooks needed");
     println!("\n  ⟳ 支援熱重載：修改 config.toml 後自動生效，無需重啟");
@@ -685,6 +759,11 @@ async fn shutdown_signal() {
             .expect("無法安裝 SIGINT 處理器 / Failed to install SIGINT handler");
         let mut sigterm = signal(SignalKind::terminate())
             .expect("無法安裝 SIGTERM 處理器 / Failed to install SIGTERM handler");
+        // 關閉終端分頁／視窗時常送 SIGHUP；未處理則會直接退出，無法執行 settings.json 還原
+        // Closing a terminal tab/window often sends SIGHUP; without a handler the process exits
+        // immediately and cannot restore ~/.claude/settings.json
+        let mut sighup = signal(SignalKind::hangup())
+            .expect("無法安裝 SIGHUP 處理器 / Failed to install SIGHUP handler");
 
         tokio::select! {
             _ = sigint.recv() => {
@@ -694,6 +773,10 @@ async fn shutdown_signal() {
             _ = sigterm.recv() => {
                 eprintln!("\n  收到 SIGTERM，正在停止伺服器...");
                 eprintln!("  Received SIGTERM, stopping server...");
+            }
+            _ = sighup.recv() => {
+                eprintln!("\n  收到 SIGHUP（例如關閉終端），正在停止伺服器...");
+                eprintln!("  Received SIGHUP (e.g. terminal closed), stopping server...");
             }
         }
         return;

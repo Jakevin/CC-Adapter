@@ -1,15 +1,17 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::sse::Sse;
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use axum::http::StatusCode;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tracing::{debug, error, info, warn};
 
 use crate::config::{Config, ServeArgs};
 use crate::convert::request::convert_request;
@@ -18,7 +20,53 @@ use crate::error::AppError;
 use crate::providers::openai::OpenAIProvider;
 use crate::providers::chatgpt::ChatGPTProvider;
 use crate::providers::anthropic::AnthropicCompatibleProvider;
-use crate::types::anthropic::MessagesRequest;
+use crate::types::anthropic::{MessagesRequest, MessagesResponse};
+
+/// INFO 日誌中回應 JSON 的最大位元組數（避免單筆日誌過大）
+/// Max JSON bytes in INFO logs per response (avoid huge log lines)
+const ANTHROPIC_RESPONSE_LOG_MAX_BYTES: usize = 24_576;
+
+/// 在 INFO 輸出完整或截斷的 Anthropic 回應 JSON，方便對照 Claude Code 是否收到預期內容
+/// Log full or truncated Anthropic response JSON at INFO for debugging client behavior
+fn log_anthropic_response_at_info(resp: &MessagesResponse) {
+    match serde_json::to_string_pretty(resp) {
+        Ok(s) if s.len() <= ANTHROPIC_RESPONSE_LOG_MAX_BYTES => {
+            info!(
+                body_bytes = s.len(),
+                truncated = false,
+                "Anthropic 回應本文 / Anthropic response JSON:\n{}",
+                s
+            );
+        }
+        Ok(s) => {
+            let cut = truncate_utf8_prefix(&s, ANTHROPIC_RESPONSE_LOG_MAX_BYTES);
+            info!(
+                body_bytes = s.len(),
+                preview_bytes = cut.len(),
+                truncated = true,
+                "Anthropic 回應本文（截斷） / Anthropic response JSON (truncated):\n{}",
+                cut
+            );
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "無法序列化 Anthropic 回應以供日誌 / Failed to serialize response for logging"
+            );
+        }
+    }
+}
+
+fn truncate_utf8_prefix(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 /// 供應商列舉：支援 OpenAI 相容（含 Grok）、ChatGPT OAuth、Anthropic 相容
 /// Provider enum: supports OpenAI-compatible (including Grok), ChatGPT OAuth, and Anthropic-compatible
@@ -169,6 +217,15 @@ pub async fn handle_messages(
         ProviderKind::OpenAI(p) => {
             handle_openai_request(p, request, &target_model, &original_model).await?
         }
+        ProviderKind::ChatGPT(p) if wants_stream => {
+            // 讀取 Codex 整段 SSE 期間若不下發任何位元組，Claude Code 會因串流閒置逾時而中止，UI 不更新
+            // While buffering the full Codex SSE we must emit bytes or Claude Code hits stream idle timeout and the UI stalls
+            let token_name = p.token_name().to_string();
+            drop(config);
+            drop(providers);
+            return chatgpt_streaming_with_keepalive(token_name, request, target_model, original_model)
+                .await;
+        }
         ProviderKind::ChatGPT(p) => {
             handle_chatgpt_request(p, request, &target_model, &original_model).await?
         }
@@ -197,9 +254,7 @@ pub async fn handle_messages(
         "回傳 Anthropic 回應 / Returning Anthropic response"
     );
 
-    if let Ok(json) = serde_json::to_string_pretty(&anthropic_response) {
-        debug!("Anthropic 回應內容 / Anthropic response body:\n{}", json);
-    }
+    log_anthropic_response_at_info(&anthropic_response);
 
     if wants_stream {
         let events = response_to_sse_events(&anthropic_response).map_err(|e| {
@@ -257,9 +312,9 @@ async fn handle_openai_request(
     })
 }
 
-/// 處理 ChatGPT 供應商的請求轉換與轉發
-/// Handle request conversion and forwarding for ChatGPT provider
-async fn handle_chatgpt_request(
+/// ChatGPT Codex → 單次 Anthropic MessagesResponse（會緩衝整段 Codex SSE）
+/// ChatGPT Codex → single Anthropic MessagesResponse (buffers full Codex SSE)
+async fn chatgpt_to_anthropic_messages(
     provider: &ChatGPTProvider,
     request: MessagesRequest,
     target_model: &str,
@@ -296,6 +351,98 @@ async fn handle_chatgpt_request(
         error!(error = %e, "Responses API 回應轉換失敗 / Responses API response conversion failed");
         AppError::internal(format!("Responses API response conversion failed: {}", e))
     })
+}
+
+/// 處理 ChatGPT 供應商的請求轉換與轉發
+/// Handle request conversion and forwarding for ChatGPT provider
+async fn handle_chatgpt_request(
+    provider: &ChatGPTProvider,
+    request: MessagesRequest,
+    target_model: &str,
+    original_model: &str,
+) -> Result<crate::types::anthropic::MessagesResponse, AppError> {
+    chatgpt_to_anthropic_messages(provider, request, target_model, original_model).await
+}
+
+/// `stream: true` 時在等待 Codex 緩衝期間下發 Anthropic `ping`，避免 Claude Code 串流閒置逾時
+/// When `stream: true`, emit Anthropic `ping` while buffering Codex to avoid Claude Code stream idle timeout
+async fn chatgpt_streaming_with_keepalive(
+    token_name: String,
+    request: MessagesRequest,
+    target_model: String,
+    original_model: String,
+) -> Result<Response, AppError> {
+    let provider = ChatGPTProvider::new(&token_name).await.map_err(|e| {
+        error!(error = %e, "無法重建 ChatGPT provider / Failed to rebuild ChatGPT provider");
+        AppError::internal(format!("ChatGPT provider init: {}", e))
+    })?;
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
+
+    tokio::spawn(async move {
+        const PING_EVERY: Duration = Duration::from_secs(15);
+        let mut interval = tokio::time::interval(PING_EVERY);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await;
+
+        let fetch = chatgpt_to_anthropic_messages(
+            &provider,
+            request,
+            target_model.as_str(),
+            original_model.as_str(),
+        );
+        tokio::pin!(fetch);
+
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let ping = Event::default()
+                        .event("ping")
+                        .data(r#"{"type":"ping"}"#);
+                    if tx.send(Ok(ping)).is_err() {
+                        return;
+                    }
+                }
+                fetched = fetch.as_mut() => {
+                    match fetched {
+                        Ok(anthropic_response) => {
+                            info!(
+                                stop_reason = ?anthropic_response.stop_reason,
+                                content_blocks = anthropic_response.content.len(),
+                                input_tokens = anthropic_response.usage.input_tokens,
+                                output_tokens = anthropic_response.usage.output_tokens,
+                                response_mode = "SSE 串流 / SSE stream (keepalive until Codex)",
+                                "回傳 Anthropic 回應 / Returning Anthropic response"
+                            );
+                            log_anthropic_response_at_info(&anthropic_response);
+                            match response_to_sse_events(&anthropic_response) {
+                                Ok(events) => {
+                                    for ev in events {
+                                        if tx.send(Ok(ev)).is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(error = %e, "SSE 事件轉換失敗 / Failed to convert to SSE events");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!(
+                                message = %e.message,
+                                "ChatGPT 串流前置請求失敗 / ChatGPT streaming prefetch failed"
+                            );
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    });
+
+    let stream = UnboundedReceiverStream::new(rx);
+    Ok(Sse::new(stream).into_response())
 }
 
 /// 處理 Anthropic 相容供應商的請求轉發（不需格式轉換，只會覆寫目標模型）

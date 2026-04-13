@@ -139,16 +139,14 @@ pub fn response_to_sse_events(resp: &MessagesResponse) -> Result<Vec<Event>> {
                 });
                 events.push(Event::default().event("content_block_start").data(block_start.to_string()));
 
-                // content_block_delta（將完整文字一次送出）
-                // content_block_delta (send complete text in one chunk)
-                if !text.is_empty() {
-                    let delta = serde_json::json!({
-                        "type": "content_block_delta",
-                        "index": index,
-                        "delta": { "type": "text_delta", "text": text }
-                    });
-                    events.push(Event::default().event("content_block_delta").data(delta.to_string()));
-                }
+                // content_block_delta（將完整文字一次送出；空字串仍送出一筆 delta，部分客戶端才會更新 UI）
+                // content_block_delta (send full text in one chunk; emit even when empty so some clients update UI)
+                let delta = serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": { "type": "text_delta", "text": text }
+                });
+                events.push(Event::default().event("content_block_delta").data(delta.to_string()));
 
                 // content_block_stop
                 let block_stop = serde_json::json!({

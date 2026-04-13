@@ -1,5 +1,41 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+
+/// Codex 有時回傳 `"text":"..."`，有時回傳 `"text":{"value":"..."}`
+/// Codex may return either `"text":"..."` or `"text":{"value":"..."}`
+fn deserialize_output_text_field<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = Value::deserialize(deserializer)?;
+    match v {
+        Value::String(s) => Ok(s),
+        Value::Object(o) => Ok(o
+            .get("value")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()),
+        Value::Null => Ok(String::new()),
+        _ => Ok(String::new()),
+    }
+}
+
+/// `arguments` 可能是 JSON 字串或已展開的物件
+/// `arguments` may be a JSON string or an embedded object
+fn deserialize_arguments_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = Value::deserialize(deserializer)?;
+    match v {
+        Value::String(s) => Ok(s),
+        Value::Object(_) | Value::Array(_) => {
+            serde_json::to_string(&v).map_err(serde::de::Error::custom)
+        }
+        Value::Null => Ok("{}".to_string()),
+        _ => Ok(v.to_string()),
+    }
+}
 
 // ─── Responses API 請求型別 ───
 // ─── Responses API Request Types ───
@@ -16,8 +52,9 @@ pub struct ResponsesRequest {
     /// 固定為 true（Codex 後端總是回傳 SSE）
     /// Always true (Codex backend always returns SSE)
     pub stream: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
+    /// ChatGPT Codex 後端必填；無 system 時由轉換層填入預設字串
+    /// Required by ChatGPT Codex backend; conversion fills a default when no system prompt
+    pub instructions: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ResponsesTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -169,10 +206,12 @@ pub enum OutputItem {
     },
     /// 函式呼叫輸出
     /// Function call output
-    #[serde(rename = "function_call")]
+    #[serde(rename = "function_call", alias = "tool_call")]
     FunctionCall {
         name: String,
+        #[serde(default, deserialize_with = "deserialize_arguments_string")]
         arguments: String,
+        #[serde(alias = "id", alias = "tool_call_id")]
         call_id: String,
     },
     /// 未知類型（reasoning、web_search 等），安全忽略
@@ -185,10 +224,13 @@ pub enum OutputItem {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum OutputContent {
-    /// 文字輸出
-    /// Text output
-    #[serde(rename = "output_text")]
-    Text { text: String },
+    /// 文字輸出（Codex / 部分後端亦使用 `type: "text"`）
+    /// Text output (Codex / some backends also use `type: "text"`)
+    #[serde(rename = "output_text", alias = "text")]
+    Text {
+        #[serde(default, deserialize_with = "deserialize_output_text_field")]
+        text: String,
+    },
     /// 未知類型（refusal 等），安全忽略
     #[serde(other)]
     Unknown,

@@ -78,6 +78,12 @@ impl ChatGPTProvider {
         Ok(new_token)
     }
 
+    /// OAuth 設定檔名稱（與 `claude-adapter login` 相同），供 server 在需 `Send` 的串流任務中重建實例
+    /// OAuth profile name (same as `claude-adapter login`), for server to rebuild in Send streaming tasks
+    pub fn token_name(&self) -> &str {
+        &self.token_name
+    }
+
     /// 傳送請求至 Codex API 並回傳 SSE 串流的原始文字
     /// Send a request to the Codex API and return the raw SSE stream text
     pub async fn send_request(&self, request: &ResponsesRequest) -> Result<String> {
@@ -137,6 +143,13 @@ impl ChatGPTProvider {
 
         log_received_response(status, body.len(), &request.model);
         debug!(body = %body, "ChatGPT Codex 回應內容 / ChatGPT Codex response body");
+
+        // 印出 SSE 原始前 1500 字元，協助偵測事件格式（INFO，可部署後移除）
+        // Log first 1500 chars of raw SSE body to detect event format (INFO, remove after fix)
+        {
+            let preview: String = body.chars().take(1500).collect();
+            info!("SSE 原始前 1500 字元 / Raw SSE body (first 1500 chars):\n{}", preview);
+        }
 
         Ok(body)
     }

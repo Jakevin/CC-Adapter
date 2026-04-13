@@ -9,6 +9,10 @@ use crate::types::responses::{
     ResponsesTool, TextConfig,
 };
 
+/// ChatGPT Codex `codex/responses` 要求請求必須帶非空 `instructions`（對應 system）
+/// ChatGPT Codex requires a non-empty `instructions` field (maps from system prompt)
+const DEFAULT_CODEX_INSTRUCTIONS: &str = "You are a helpful assistant.";
+
 /// 將 Anthropic Messages API 請求轉換為 OpenAI Responses API 請求
 /// Convert an Anthropic Messages API request into an OpenAI Responses API request
 pub fn convert_request_to_responses(
@@ -17,9 +21,9 @@ pub fn convert_request_to_responses(
 ) -> Result<ResponsesRequest> {
     let model = resolved_model.to_string();
 
-    // 提取系統提示作為 instructions
-    // Extract system prompt as instructions
-    let instructions = req.system.as_ref().map(|s| match s {
+    // 提取系統提示作為 instructions（缺省或全空白時填預設，否則 Codex 回 HTTP 400）
+    // Extract system prompt as instructions (default if missing/blank, else Codex returns HTTP 400)
+    let from_system = req.system.as_ref().map(|s| match s {
         SystemPrompt::Text(text) => text.clone(),
         SystemPrompt::Blocks(blocks) => blocks
             .iter()
@@ -27,6 +31,10 @@ pub fn convert_request_to_responses(
             .collect::<Vec<_>>()
             .join("\n\n"),
     });
+    let instructions = match from_system {
+        Some(ref s) if !s.trim().is_empty() => s.clone(),
+        _ => DEFAULT_CODEX_INSTRUCTIONS.to_string(),
+    };
 
     let mut input: Vec<InputItem> = Vec::new();
 
@@ -52,7 +60,9 @@ pub fn convert_request_to_responses(
         text: Some(TextConfig {
             verbosity: Some("medium".to_string()),
         }),
-        include: Some(vec!["reasoning.encrypted_content".to_string()]),
+        // 勿要求 reasoning.encrypted_content：Codex 常把可讀回覆壓進加密區塊，導致 message 正文為空、Claude Code 無內容
+        // Avoid requesting reasoning.encrypted_content: Codex often hides visible text there, leaving message body empty
+        include: None,
     })
 }
 
@@ -265,7 +275,7 @@ mod tests {
         let result = convert_request_to_responses(req, "gpt-5-codex").unwrap();
 
         assert_eq!(result.model, "gpt-5-codex");
-        assert_eq!(result.instructions.as_deref(), Some("You are helpful."));
+        assert_eq!(result.instructions, "You are helpful.");
         assert!(!result.store);
         assert!(result.stream);
         assert_eq!(result.input.len(), 1);
@@ -325,6 +335,7 @@ mod tests {
         // Should produce: user message, assistant message, function_call, function_call_output
         assert_eq!(result.input.len(), 4);
         assert!(result.tools.is_some());
+        assert_eq!(result.instructions, DEFAULT_CODEX_INSTRUCTIONS);
     }
 
     #[test]

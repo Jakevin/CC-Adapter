@@ -3,6 +3,7 @@ use serde_json::Value;
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::convert::tool_sanitizer::sanitize_tool_input;
 use crate::types::anthropic::{MessagesResponse, ResponseContentBlock, Usage};
 use crate::types::responses::{OutputContent, OutputItem, ResponsesResponse};
 
@@ -350,6 +351,7 @@ fn extract_tool_use_blocks_from_response_value(resp: &Value) -> Vec<ResponseCont
         };
         let input: Value =
             serde_json::from_str(&arguments).unwrap_or_else(|_| Value::Object(Default::default()));
+        let input = sanitize_tool_input(&name, input);
         out.push(ResponseContentBlock::ToolUse { id, name, input });
     }
     out
@@ -966,6 +968,7 @@ fn collect_tool_use_blocks_from_events(sse_text: &str) -> Vec<ResponseContentBlo
         };
         let input: Value =
             serde_json::from_str(&arguments).unwrap_or(Value::Object(Default::default()));
+        let input = sanitize_tool_input(&name, input);
         out.push(ResponseContentBlock::ToolUse { id, name, input });
     });
     out
@@ -1076,6 +1079,7 @@ fn convert_parsed_response(
                     serde_json::from_str(arguments).unwrap_or(serde_json::Value::Object(
                         serde_json::Map::new(),
                     ));
+                let input = sanitize_tool_input(name, input);
                 content.push(ResponseContentBlock::ToolUse {
                     id: call_id.clone(),
                     name: name.clone(),
@@ -1318,6 +1322,61 @@ data: {"type":"response.completed","response":{"id":"r","status":"completed","mo
                 assert_eq!(id, "c1");
                 assert_eq!(name, "Bash");
                 assert_eq!(input.get("cmd").and_then(|x| x.as_str()), Some("ls"));
+            }
+            _ => panic!("expected tool_use"),
+        }
+    }
+
+    #[test]
+    fn test_completed_function_call_sanitizes_read_pages() {
+        let sse = r#"event: response.completed
+data: {"type":"response.completed","response":{"id":"r","status":"completed","model":"m","output":[{"type":"function_call","call_id":"c1","name":"Read","arguments":"{\"file_path\":\"C:/workspace/RESULTS.md\",\"limit\":2000,\"offset\":0,\"pages\":\"1\"}"}]}}
+
+"#;
+        let result = convert_responses_to_anthropic(sse, "claude-sonnet-4-6").unwrap();
+        assert_eq!(result.stop_reason.as_deref(), Some("tool_use"));
+        match &result.content[0] {
+            ResponseContentBlock::ToolUse { input, .. } => {
+                assert!(input.get("pages").is_none());
+                assert_eq!(input.get("limit").and_then(|v| v.as_i64()), Some(2000));
+            }
+            _ => panic!("expected tool_use"),
+        }
+    }
+
+    #[test]
+    fn test_raw_output_tool_call_sanitizes_read_pages() {
+        let v: Value = serde_json::from_str(
+            r#"{"output":[{"type":"tool_call","call_id":"c1","name":"Read","arguments":{"file_path":"C:/workspace/A.txt","pages":""}}]}"#,
+        )
+        .unwrap();
+
+        let blocks = extract_tool_use_blocks_from_response_value(&v);
+
+        match &blocks[0] {
+            ResponseContentBlock::ToolUse { input, .. } => {
+                assert!(input.get("pages").is_none());
+                assert_eq!(
+                    input.get("file_path").and_then(|v| v.as_str()),
+                    Some("C:/workspace/A.txt")
+                );
+            }
+            _ => panic!("expected tool_use"),
+        }
+    }
+
+    #[test]
+    fn test_sse_output_item_done_sanitizes_read_pages() {
+        let sse = r#"event: response.output_item.done
+data: {"item":{"type":"function_call","call_id":"c1","name":"Read","arguments":"{\"file_path\":\"C:/workspace/doc.md\",\"pages\":\"1\"}"}}
+
+"#;
+
+        let blocks = collect_tool_use_blocks_from_events(sse);
+
+        match &blocks[0] {
+            ResponseContentBlock::ToolUse { input, .. } => {
+                assert!(input.get("pages").is_none());
             }
             _ => panic!("expected tool_use"),
         }

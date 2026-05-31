@@ -3,6 +3,7 @@ use axum::response::sse::Event;
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::convert::tool_sanitizer::sanitize_tool_input;
 use crate::types::anthropic::{MessagesResponse, ResponseContentBlock, Usage};
 use crate::types::openai::ChatCompletionResponse;
 
@@ -35,6 +36,7 @@ pub fn convert_response(
             // Parse JSON string into an object; fall back to empty object on failure
             let input: Value = serde_json::from_str(&tc.function.arguments)
                 .unwrap_or(Value::Object(serde_json::Map::new()));
+            let input = sanitize_tool_input(&tc.function.name, input);
 
             content.push(ResponseContentBlock::ToolUse {
                 id: tc.id.clone(),
@@ -318,5 +320,44 @@ mod tests {
         // 應包含文字 + tool_use 兩個內容區塊
         // Should contain text + tool_use — 2 content blocks
         assert_eq!(result.content.len(), 2);
+    }
+
+    #[test]
+    fn test_tool_call_response_sanitizes_read_pages() {
+        let resp = ChatCompletionResponse {
+            id: "chatcmpl-read".to_string(),
+            object: "chat.completion".to_string(),
+            created: 1234567890,
+            model: "gpt-4o".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: ChoiceMessage {
+                    role: "assistant".to_string(),
+                    content: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_read".to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "Read".to_string(),
+                            arguments: r#"{"file_path":"C:/workspace/PROBLEM_ANALYSIS.md","limit":2000,"offset":0,"pages":"1"}"#.to_string(),
+                        },
+                    }]),
+                    refusal: None,
+                },
+                finish_reason: Some("tool_calls".to_string()),
+            }],
+            usage: None,
+            system_fingerprint: None,
+        };
+
+        let result = convert_response(resp, "claude-sonnet-4-6").unwrap();
+
+        match &result.content[0] {
+            ResponseContentBlock::ToolUse { input, .. } => {
+                assert!(input.get("pages").is_none());
+                assert_eq!(input.get("limit").and_then(|v| v.as_i64()), Some(2000));
+            }
+            _ => panic!("expected tool_use"),
+        }
     }
 }

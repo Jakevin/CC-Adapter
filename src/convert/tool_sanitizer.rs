@@ -7,6 +7,9 @@ pub fn sanitize_tool_input(tool_name: &str, mut input: Value) -> Value {
     if tool_name == "Read" {
         sanitize_read_input(&mut input);
     }
+    if tool_name == "TodoWrite" {
+        sanitize_todo_write_input(&mut input);
+    }
 
     input
 }
@@ -39,6 +42,45 @@ fn sanitize_read_input(input: &mut Value) {
 
     if !is_pdf {
         map.remove("pages");
+    }
+}
+
+fn sanitize_todo_write_input(input: &mut Value) {
+    let Value::Object(map) = input else {
+        return;
+    };
+
+    let Some(Value::Array(todos)) = map.get_mut("todos") else {
+        return;
+    };
+
+    for todo in todos {
+        let Value::Object(todo_map) = todo else {
+            continue;
+        };
+
+        let content = todo_map
+            .get("content")
+            .and_then(|value| value.as_str())
+            .filter(|content| !content.is_empty())
+            .map(str::to_string);
+        let active_form = todo_map
+            .get("activeForm")
+            .and_then(|value| value.as_str())
+            .filter(|active_form| !active_form.is_empty())
+            .map(str::to_string);
+
+        if content.is_none()
+            && let Some(active_form) = active_form.as_ref()
+        {
+            todo_map.insert("content".to_string(), Value::String(active_form.clone()));
+        }
+
+        if active_form.is_none()
+            && let Some(content) = content.as_ref()
+        {
+            todo_map.insert("activeForm".to_string(), Value::String(content.clone()));
+        }
     }
 }
 
@@ -116,5 +158,53 @@ mod tests {
 
         assert_eq!(result.get("command").and_then(|v| v.as_str()), Some(""));
         assert!(result.get("description").is_none());
+    }
+
+    #[test]
+    fn todo_write_fills_missing_content_from_active_form() {
+        let input = json!({
+            "todos": [
+                {
+                    "activeForm": "修复工具参数",
+                    "status": "in_progress"
+                }
+            ]
+        });
+
+        let result = sanitize_tool_input("TodoWrite", input);
+
+        assert_eq!(
+            result
+                .get("todos")
+                .and_then(|value| value.as_array())
+                .and_then(|todos| todos.first())
+                .and_then(|todo| todo.get("content"))
+                .and_then(|value| value.as_str()),
+            Some("修复工具参数")
+        );
+    }
+
+    #[test]
+    fn todo_write_fills_missing_active_form_from_content() {
+        let input = json!({
+            "todos": [
+                {
+                    "content": "修复工具参数",
+                    "status": "pending"
+                }
+            ]
+        });
+
+        let result = sanitize_tool_input("TodoWrite", input);
+
+        assert_eq!(
+            result
+                .get("todos")
+                .and_then(|value| value.as_array())
+                .and_then(|todos| todos.first())
+                .and_then(|todo| todo.get("activeForm"))
+                .and_then(|value| value.as_str()),
+            Some("修复工具参数")
+        );
     }
 }

@@ -68,9 +68,7 @@ pub enum MessageContent {
 #[serde(tag = "type")]
 pub enum ContentBlock {
     #[serde(rename = "text")]
-    Text {
-        text: String,
-    },
+    Text { text: String },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -86,9 +84,7 @@ pub enum ContentBlock {
         is_error: Option<bool>,
     },
     #[serde(rename = "image")]
-    Image {
-        source: ImageSource,
-    },
+    Image { source: ImageSource },
     #[serde(rename = "thinking")]
     Thinking {
         thinking: String,
@@ -119,9 +115,30 @@ pub struct ToolDefinition {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub input_schema: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_control: Option<Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tool_definition_allows_missing_input_schema() {
+        let raw = r#"{
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "WebSearch", "description": "Search the web"}]
+        }"#;
+
+        let req: MessagesRequest = serde_json::from_str(raw).unwrap();
+        let tools = req.tools.unwrap();
+        assert_eq!(tools[0].name, "WebSearch");
+        assert!(tools[0].input_schema.is_none());
+    }
 }
 
 /// 工具選擇策略：auto（自動）、any（必須呼叫）、tool（指定工具）、none（禁止）

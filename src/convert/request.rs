@@ -1,8 +1,9 @@
 use anyhow::Result;
 
+use crate::convert::tool_schema::normalize_tool_input_schema;
 use crate::types::anthropic::{
-    ContentBlock, Message, MessageContent, MessagesRequest, SystemPrompt, ToolChoice as AnthropicToolChoice,
-    ToolDefinition, ToolResultContent,
+    ContentBlock, Message, MessageContent, MessagesRequest, SystemPrompt,
+    ToolChoice as AnthropicToolChoice, ToolDefinition, ToolResultContent,
 };
 use crate::types::openai::{
     ChatCompletionRequest, ChatMessage, ChatMessageContent, ContentPart, FunctionCall, FunctionDef,
@@ -180,10 +181,7 @@ fn convert_user_blocks(blocks: &[ContentBlock], out: &mut Vec<ChatMessage>) -> R
             ContentBlock::Image { source } => {
                 // 將 base64 圖片轉為 data URI 格式
                 // Convert base64 image into data URI format
-                let data_url = format!(
-                    "data:{};base64,{}",
-                    source.media_type, source.data
-                );
+                let data_url = format!("data:{};base64,{}", source.media_type, source.data);
                 content_parts.push(ContentPart::ImageUrl {
                     image_url: ImageUrl {
                         url: data_url,
@@ -273,7 +271,10 @@ fn convert_tools(tools: &[ToolDefinition]) -> Vec<Tool> {
             function: FunctionDef {
                 name: t.name.clone(),
                 description: t.description.clone(),
-                parameters: Some(t.input_schema.clone()),
+                parameters: Some(normalize_tool_input_schema(
+                    &t.name,
+                    t.input_schema.as_ref(),
+                )),
                 strict: None,
             },
         })
@@ -287,14 +288,10 @@ fn convert_tool_choice(tc: &AnthropicToolChoice) -> OpenAIToolChoice {
         AnthropicToolChoice::Auto { .. } => OpenAIToolChoice::String("auto".to_string()),
         AnthropicToolChoice::Any { .. } => OpenAIToolChoice::String("required".to_string()),
         AnthropicToolChoice::None {} => OpenAIToolChoice::String("none".to_string()),
-        AnthropicToolChoice::Tool { name, .. } => {
-            OpenAIToolChoice::Object(ToolChoiceObject {
-                choice_type: "function".to_string(),
-                function: ToolChoiceFunction {
-                    name: name.clone(),
-                },
-            })
-        }
+        AnthropicToolChoice::Tool { name, .. } => OpenAIToolChoice::Object(ToolChoiceObject {
+            choice_type: "function".to_string(),
+            function: ToolChoiceFunction { name: name.clone() },
+        }),
     }
 }
 
@@ -367,7 +364,9 @@ mod tests {
             tools: Some(vec![ToolDefinition {
                 name: "get_weather".to_string(),
                 description: Some("Get weather".to_string()),
-                input_schema: json!({"type": "object", "properties": {"location": {"type": "string"}}}),
+                input_schema: Some(
+                    json!({"type": "object", "properties": {"location": {"type": "string"}}}),
+                ),
                 cache_control: None,
             }]),
             tool_choice: Some(AnthropicToolChoice::Auto {
@@ -389,15 +388,118 @@ mod tests {
         assert_eq!(result.messages[1].role, "assistant");
         assert!(result.messages[1].tool_calls.is_some());
         assert_eq!(result.messages[2].role, "tool");
-        assert_eq!(
-            result.messages[2].tool_call_id.as_deref(),
-            Some("toolu_01")
-        );
+        assert_eq!(result.messages[2].tool_call_id.as_deref(), Some("toolu_01"));
 
         // 驗證工具定義已正確轉換
         // Verify tool definitions are correctly converted
         assert!(result.tools.is_some());
         let tools = result.tools.unwrap();
         assert_eq!(tools[0].function.name, "get_weather");
+    }
+
+    #[test]
+    fn test_missing_web_search_schema_is_normalized() {
+        let req = MessagesRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: MessageContent::Text("search".to_string()),
+            }],
+            system: None,
+            tools: Some(vec![ToolDefinition {
+                name: "WebSearch".to_string(),
+                description: None,
+                input_schema: None,
+                cache_control: None,
+            }]),
+            tool_choice: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            metadata: None,
+        };
+
+        let result = convert_request(req, "gpt-4o").unwrap();
+        let parameters = result.tools.unwrap()[0]
+            .function
+            .parameters
+            .clone()
+            .unwrap();
+        assert!(parameters["properties"].get("query").is_some());
+        assert!(parameters["properties"].get("allowed_domains").is_some());
+        assert!(parameters["properties"].get("blocked_domains").is_some());
+    }
+
+    #[test]
+    fn test_missing_web_fetch_schema_is_normalized() {
+        let req = MessagesRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: MessageContent::Text("fetch".to_string()),
+            }],
+            system: None,
+            tools: Some(vec![ToolDefinition {
+                name: "WebFetch".to_string(),
+                description: None,
+                input_schema: None,
+                cache_control: None,
+            }]),
+            tool_choice: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            metadata: None,
+        };
+
+        let result = convert_request(req, "gpt-4o").unwrap();
+        let parameters = result.tools.unwrap()[0]
+            .function
+            .parameters
+            .clone()
+            .unwrap();
+        assert!(parameters["properties"].get("url").is_some());
+        assert!(parameters["properties"].get("prompt").is_some());
+    }
+
+    #[test]
+    fn test_missing_unknown_tool_schema_is_generic_object() {
+        let req = MessagesRequest {
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: MessageContent::Text("run".to_string()),
+            }],
+            system: None,
+            tools: Some(vec![ToolDefinition {
+                name: "CustomTool".to_string(),
+                description: None,
+                input_schema: None,
+                cache_control: None,
+            }]),
+            tool_choice: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            metadata: None,
+        };
+
+        let result = convert_request(req, "gpt-4o").unwrap();
+        let parameters = result.tools.unwrap()[0]
+            .function
+            .parameters
+            .clone()
+            .unwrap();
+        assert_eq!(parameters["type"].as_str(), Some("object"));
+        assert_eq!(parameters["additionalProperties"].as_bool(), Some(true));
     }
 }

@@ -13,10 +13,9 @@ pub fn convert_response(
     resp: ChatCompletionResponse,
     original_model: &str,
 ) -> Result<MessagesResponse> {
-    let choice = resp
-        .choices
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("OpenAI 回應中沒有 choices / No choices in OpenAI response"))?;
+    let choice = resp.choices.first().ok_or_else(|| {
+        anyhow::anyhow!("OpenAI 回應中沒有 choices / No choices in OpenAI response")
+    })?;
 
     let mut content: Vec<ResponseContentBlock> = Vec::new();
 
@@ -54,7 +53,14 @@ pub fn convert_response(
         });
     }
 
-    let stop_reason = convert_finish_reason(choice.finish_reason.as_deref());
+    let has_tool_use = content
+        .iter()
+        .any(|b| matches!(b, ResponseContentBlock::ToolUse { .. }));
+    let stop_reason = if has_tool_use {
+        "tool_use".to_string()
+    } else {
+        convert_finish_reason(choice.finish_reason.as_deref())
+    };
 
     let usage = match &resp.usage {
         Some(u) => Usage {
@@ -126,7 +132,11 @@ pub fn response_to_sse_events(resp: &MessagesResponse) -> Result<Vec<Event>> {
             }
         }
     });
-    events.push(Event::default().event("message_start").data(message_start.to_string()));
+    events.push(
+        Event::default()
+            .event("message_start")
+            .data(message_start.to_string()),
+    );
 
     // 2. 依序發送每個內容區塊的 start / delta / stop 事件
     // 2. Emit start / delta / stop events for each content block in order
@@ -139,7 +149,11 @@ pub fn response_to_sse_events(resp: &MessagesResponse) -> Result<Vec<Event>> {
                     "index": index,
                     "content_block": { "type": "text", "text": "" }
                 });
-                events.push(Event::default().event("content_block_start").data(block_start.to_string()));
+                events.push(
+                    Event::default()
+                        .event("content_block_start")
+                        .data(block_start.to_string()),
+                );
 
                 // content_block_delta（將完整文字一次送出；空字串仍送出一筆 delta，部分客戶端才會更新 UI）
                 // content_block_delta (send full text in one chunk; emit even when empty so some clients update UI)
@@ -148,14 +162,22 @@ pub fn response_to_sse_events(resp: &MessagesResponse) -> Result<Vec<Event>> {
                     "index": index,
                     "delta": { "type": "text_delta", "text": text }
                 });
-                events.push(Event::default().event("content_block_delta").data(delta.to_string()));
+                events.push(
+                    Event::default()
+                        .event("content_block_delta")
+                        .data(delta.to_string()),
+                );
 
                 // content_block_stop
                 let block_stop = serde_json::json!({
                     "type": "content_block_stop",
                     "index": index
                 });
-                events.push(Event::default().event("content_block_stop").data(block_stop.to_string()));
+                events.push(
+                    Event::default()
+                        .event("content_block_stop")
+                        .data(block_stop.to_string()),
+                );
             }
             ResponseContentBlock::ToolUse { id, name, input } => {
                 // content_block_start（tool_use 區塊，input 為空物件）
@@ -170,7 +192,11 @@ pub fn response_to_sse_events(resp: &MessagesResponse) -> Result<Vec<Event>> {
                         "input": {}
                     }
                 });
-                events.push(Event::default().event("content_block_start").data(block_start.to_string()));
+                events.push(
+                    Event::default()
+                        .event("content_block_start")
+                        .data(block_start.to_string()),
+                );
 
                 // content_block_delta（以 input_json_delta 一次送出完整 JSON）
                 // content_block_delta (send complete JSON via input_json_delta in one chunk)
@@ -180,14 +206,22 @@ pub fn response_to_sse_events(resp: &MessagesResponse) -> Result<Vec<Event>> {
                     "index": index,
                     "delta": { "type": "input_json_delta", "partial_json": input_json }
                 });
-                events.push(Event::default().event("content_block_delta").data(delta.to_string()));
+                events.push(
+                    Event::default()
+                        .event("content_block_delta")
+                        .data(delta.to_string()),
+                );
 
                 // content_block_stop
                 let block_stop = serde_json::json!({
                     "type": "content_block_stop",
                     "index": index
                 });
-                events.push(Event::default().event("content_block_stop").data(block_stop.to_string()));
+                events.push(
+                    Event::default()
+                        .event("content_block_stop")
+                        .data(block_stop.to_string()),
+                );
             }
             ResponseContentBlock::Thinking { thinking, .. } => {
                 // 將 thinking 區塊以 Anthropic 官方 SSE 格式轉發：
@@ -198,7 +232,11 @@ pub fn response_to_sse_events(resp: &MessagesResponse) -> Result<Vec<Event>> {
                     "index": index,
                     "content_block": { "type": "thinking", "thinking": "" }
                 });
-                events.push(Event::default().event("content_block_start").data(block_start.to_string()));
+                events.push(
+                    Event::default()
+                        .event("content_block_start")
+                        .data(block_start.to_string()),
+                );
 
                 if !thinking.is_empty() {
                     let delta = serde_json::json!({
@@ -206,14 +244,22 @@ pub fn response_to_sse_events(resp: &MessagesResponse) -> Result<Vec<Event>> {
                         "index": index,
                         "delta": { "type": "thinking_delta", "thinking": thinking }
                     });
-                    events.push(Event::default().event("content_block_delta").data(delta.to_string()));
+                    events.push(
+                        Event::default()
+                            .event("content_block_delta")
+                            .data(delta.to_string()),
+                    );
                 }
 
                 let block_stop = serde_json::json!({
                     "type": "content_block_stop",
                     "index": index
                 });
-                events.push(Event::default().event("content_block_stop").data(block_stop.to_string()));
+                events.push(
+                    Event::default()
+                        .event("content_block_stop")
+                        .data(block_stop.to_string()),
+                );
             }
         }
     }
@@ -230,11 +276,19 @@ pub fn response_to_sse_events(resp: &MessagesResponse) -> Result<Vec<Event>> {
             "output_tokens": resp.usage.output_tokens
         }
     });
-    events.push(Event::default().event("message_delta").data(message_delta.to_string()));
+    events.push(
+        Event::default()
+            .event("message_delta")
+            .data(message_delta.to_string()),
+    );
 
     // 4. message_stop
     let message_stop = serde_json::json!({ "type": "message_stop" });
-    events.push(Event::default().event("message_stop").data(message_stop.to_string()));
+    events.push(
+        Event::default()
+            .event("message_stop")
+            .data(message_stop.to_string()),
+    );
 
     Ok(events)
 }
@@ -242,9 +296,7 @@ pub fn response_to_sse_events(resp: &MessagesResponse) -> Result<Vec<Event>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::openai::{
-        Choice, ChoiceMessage, FunctionCall, ResponseUsage, ToolCall,
-    };
+    use crate::types::openai::{Choice, ChoiceMessage, FunctionCall, ResponseUsage, ToolCall};
 
     #[test]
     fn test_basic_text_response() {
@@ -359,5 +411,68 @@ mod tests {
             }
             _ => panic!("expected tool_use"),
         }
+    }
+
+    #[test]
+    fn test_tool_call_response_without_finish_reason_uses_tool_stop_reason() {
+        let resp = ChatCompletionResponse {
+            id: "chatcmpl-tool-no-finish".to_string(),
+            object: "chat.completion".to_string(),
+            created: 1234567890,
+            model: "gpt-4o".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: ChoiceMessage {
+                    role: "assistant".to_string(),
+                    content: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_001".to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "Bash".to_string(),
+                            arguments: r#"{"command":"pwd"}"#.to_string(),
+                        },
+                    }]),
+                    refusal: None,
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+            system_fingerprint: None,
+        };
+
+        let result = convert_response(resp, "claude-sonnet-4-6").unwrap();
+
+        assert_eq!(result.stop_reason.as_deref(), Some("tool_use"));
+        assert_eq!(result.usage.input_tokens, 0);
+        assert_eq!(result.usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn test_text_response_without_finish_reason_or_usage_defaults_cleanly() {
+        let resp = ChatCompletionResponse {
+            id: "chatcmpl-text-no-finish".to_string(),
+            object: "chat.completion".to_string(),
+            created: 1234567890,
+            model: "gpt-4o".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: ChoiceMessage {
+                    role: "assistant".to_string(),
+                    content: Some("Done".to_string()),
+                    tool_calls: None,
+                    refusal: None,
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+            system_fingerprint: None,
+        };
+
+        let result = convert_response(resp, "claude-sonnet-4-6").unwrap();
+
+        assert_eq!(result.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(result.usage.input_tokens, 0);
+        assert_eq!(result.usage.output_tokens, 0);
     }
 }

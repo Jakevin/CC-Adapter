@@ -22,14 +22,12 @@ impl ChatGPTProvider {
     /// 建構 ChatGPTProvider，從 token store 載入認證資訊
     /// Construct ChatGPTProvider, loading auth info from token store
     pub async fn new(name: &str) -> Result<Self> {
-        let token_data = token_store::load_named(name)?
-            .context(
-                "未找到 OAuth token，請先執行 `claude-adapter login` / \
+        let token_data = token_store::load_named(name)?.context(
+            "未找到 OAuth token，請先執行 `claude-adapter login` / \
                  No OAuth token found, please run `claude-adapter login` first",
-            )?;
+        )?;
 
-        let account_id = oauth::extract_account_id(&token_data.access_token)
-            .unwrap_or_default();
+        let account_id = oauth::extract_account_id(&token_data.access_token).unwrap_or_default();
 
         if account_id.is_empty() {
             warn!(
@@ -113,11 +111,15 @@ impl ChatGPTProvider {
             req_builder = req_builder.header("chatgpt-account-id", &account_id);
         }
 
-        let resp = req_builder
-            .json(request)
-            .send()
-            .await
-            .context("無法傳送請求至 ChatGPT Codex / Failed to send request to ChatGPT Codex")?;
+        let resp = req_builder.json(request).send().await.map_err(|err| {
+            anyhow::anyhow!(
+                "{}: failed to send request to ChatGPT Codex (model: {}, URL: {}): {}",
+                classify_reqwest_error(&err),
+                request.model,
+                url,
+                err
+            )
+        })?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -127,10 +129,10 @@ impl ChatGPTProvider {
                 .unwrap_or_else(|_| "無法讀取錯誤回應 / Failed to read error body".to_string());
             // 在錯誤訊息中包含 API URL，方便偵錯 404 / Include API URL in error message for easier 404 debugging
             anyhow::bail!(
-                "ChatGPT Codex 回傳 HTTP {} (URL: {}) / ChatGPT Codex returned HTTP {} at {}: {}",
+                "{}: ChatGPT Codex returned HTTP {} (model: {}, URL: {}): {}",
+                classify_http_status(status),
                 status.as_u16(),
-                url,
-                status.as_u16(),
+                request.model,
                 url,
                 body
             );
@@ -148,7 +150,10 @@ impl ChatGPTProvider {
         // Log first 1500 chars of raw SSE body to detect event format (INFO, remove after fix)
         {
             let preview: String = body.chars().take(1500).collect();
-            info!("SSE 原始前 1500 字元 / Raw SSE body (first 1500 chars):\n{}", preview);
+            info!(
+                "SSE 原始前 1500 字元 / Raw SSE body (first 1500 chars):\n{}",
+                preview
+            );
         }
 
         Ok(body)
@@ -162,6 +167,23 @@ fn log_received_response(status: StatusCode, body_len: usize, model: &str) {
         model = %model,
         "收到 ChatGPT Codex 回應 / Received response from ChatGPT Codex"
     );
+}
+
+fn classify_reqwest_error(err: &reqwest::Error) -> &'static str {
+    if err.is_timeout() {
+        "timeout"
+    } else {
+        "request_failed"
+    }
+}
+
+fn classify_http_status(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        400 => "bad_request",
+        422 => "unprocessable_entity",
+        500..=599 => "provider_5xx",
+        _ => "provider_http_error",
+    }
 }
 
 #[cfg(test)]
@@ -220,5 +242,18 @@ mod tests {
         let output = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
         assert!(output.contains("Received response from ChatGPT Codex"));
         assert!(output.contains("model=gpt-5.3-codex"));
+    }
+
+    #[test]
+    fn test_http_status_classification() {
+        assert_eq!(classify_http_status(StatusCode::BAD_REQUEST), "bad_request");
+        assert_eq!(
+            classify_http_status(StatusCode::UNPROCESSABLE_ENTITY),
+            "unprocessable_entity"
+        );
+        assert_eq!(
+            classify_http_status(StatusCode::BAD_GATEWAY),
+            "provider_5xx"
+        );
     }
 }

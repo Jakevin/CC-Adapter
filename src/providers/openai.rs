@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use tracing::{debug, info};
 
 use crate::types::openai::{ChatCompletionRequest, ChatCompletionResponse};
@@ -45,7 +45,15 @@ impl OpenAIProvider {
             .json(&request)
             .send()
             .await
-            .context("無法傳送請求至供應商 / Failed to send request to provider")?;
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "{} request failed (model: {}, URL: {}): {}",
+                    classify_reqwest_error(&err),
+                    request.model,
+                    url,
+                    err
+                )
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -55,10 +63,10 @@ impl OpenAIProvider {
                 .unwrap_or_else(|_| "無法讀取錯誤回應 / Failed to read error body".to_string());
             // 在錯誤訊息中包含 API URL，方便偵錯 404 / Include API URL in error message for easier 404 debugging
             anyhow::bail!(
-                "供應商回傳 HTTP {} (URL: {}) / Provider returned HTTP {} at {}: {}",
+                "{}: provider returned HTTP {} (model: {}, URL: {}): {}",
+                classify_http_status(status),
                 status.as_u16(),
-                url,
-                status.as_u16(),
+                request.model,
                 url,
                 body
             );
@@ -76,9 +84,55 @@ impl OpenAIProvider {
         );
         debug!(body = %body, "供應商回應內容 / Provider response body");
 
-        let response: ChatCompletionResponse =
-            serde_json::from_str(&body).context("無法解析供應商回應 / Failed to parse provider response")?;
+        let response: ChatCompletionResponse = serde_json::from_str(&body).with_context(|| {
+            format!(
+                "json_parse_failed: failed to parse provider response (model: {}, URL: {}, HTTP {}, body preview: {})",
+                request.model,
+                url,
+                status.as_u16(),
+                preview_body(&body, 1000)
+            )
+        })?;
 
         Ok(response)
+    }
+}
+
+fn classify_reqwest_error(err: &reqwest::Error) -> &'static str {
+    if err.is_timeout() {
+        "timeout"
+    } else {
+        "request_failed"
+    }
+}
+
+fn classify_http_status(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        400 => "bad_request",
+        422 => "unprocessable_entity",
+        500..=599 => "provider_5xx",
+        _ => "provider_http_error",
+    }
+}
+
+fn preview_body(body: &str, max_chars: usize) -> String {
+    body.chars().take(max_chars).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_http_status_classification() {
+        assert_eq!(classify_http_status(StatusCode::BAD_REQUEST), "bad_request");
+        assert_eq!(
+            classify_http_status(StatusCode::UNPROCESSABLE_ENTITY),
+            "unprocessable_entity"
+        );
+        assert_eq!(
+            classify_http_status(StatusCode::INTERNAL_SERVER_ERROR),
+            "provider_5xx"
+        );
     }
 }

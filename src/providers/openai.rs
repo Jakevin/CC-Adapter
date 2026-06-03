@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use reqwest::{Client, StatusCode};
+use tokio_stream::Stream;
 use tracing::{debug, info};
 
 use crate::types::openai::{ChatCompletionRequest, ChatCompletionResponse};
@@ -95,6 +96,65 @@ impl OpenAIProvider {
         })?;
 
         Ok(response)
+    }
+
+    pub async fn chat_completion_stream(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<impl Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static> {
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+
+        debug!(model = %request.model, url = %url, "轉發串流請求至供應商 / Forwarding streaming request to provider");
+
+        if let Ok(json) = serde_json::to_string_pretty(&request) {
+            debug!(
+                "送出串流請求內容 / Outgoing streaming request body:\n{}",
+                json
+            );
+        }
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .json(&request)
+            .send()
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "{} stream request failed (model: {}, URL: {}): {}",
+                    classify_reqwest_error(&err),
+                    request.model,
+                    url,
+                    err
+                )
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "無法讀取錯誤回應 / Failed to read error body".to_string());
+            anyhow::bail!(
+                "{}: provider returned HTTP {} for stream (model: {}, URL: {}): {}",
+                classify_http_status(status),
+                status.as_u16(),
+                request.model,
+                url,
+                body
+            );
+        }
+
+        info!(
+            status = %status,
+            model = %request.model,
+            "收到供應商串流回應 / Received streaming response from provider"
+        );
+
+        Ok(resp.bytes_stream())
     }
 }
 

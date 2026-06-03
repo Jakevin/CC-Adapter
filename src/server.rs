@@ -3,23 +3,25 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
+use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
-use axum::http::StatusCode;
 use tokio::sync::RwLock;
+use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{Config, ServeArgs};
+use crate::convert::openai_stream::{OpenAIStreamAccumulator, parse_openai_stream_data_line};
 use crate::convert::request::convert_request;
 use crate::convert::response::{convert_response, response_to_sse_events};
 use crate::error::AppError;
-use crate::providers::openai::OpenAIProvider;
-use crate::providers::chatgpt::ChatGPTProvider;
 use crate::providers::anthropic::AnthropicCompatibleProvider;
+use crate::providers::chatgpt::ChatGPTProvider;
+use crate::providers::openai::OpenAIProvider;
 use crate::types::anthropic::{MessagesRequest, MessagesResponse};
 
 /// INFO 日誌中回應 JSON 的最大位元組數（避免單筆日誌過大）
@@ -118,7 +120,10 @@ async fn build_providers(config: &Config) -> anyhow::Result<HashMap<String, Prov
 
 /// 根據配置建構 AppState
 /// Build AppState based on configuration
-pub async fn build_app_state(config: Config, serve_args: ServeArgs) -> anyhow::Result<Arc<AppState>> {
+pub async fn build_app_state(
+    config: Config,
+    serve_args: ServeArgs,
+) -> anyhow::Result<Arc<AppState>> {
     let providers = build_providers(&config).await?;
 
     Ok(Arc::new(AppState {
@@ -214,6 +219,10 @@ pub async fn handle_messages(
     })?;
 
     let anthropic_response = match provider {
+        ProviderKind::OpenAI(p) if wants_stream => {
+            return handle_openai_streaming_request(p, request, &target_model, &original_model)
+                .await;
+        }
         ProviderKind::OpenAI(p) => {
             handle_openai_request(p, request, &target_model, &original_model).await?
         }
@@ -223,8 +232,13 @@ pub async fn handle_messages(
             let token_name = p.token_name().to_string();
             drop(config);
             drop(providers);
-            return chatgpt_streaming_with_keepalive(token_name, request, target_model, original_model)
-                .await;
+            return chatgpt_streaming_with_keepalive(
+                token_name,
+                request,
+                target_model,
+                original_model,
+            )
+            .await;
         }
         ProviderKind::ChatGPT(p) => {
             handle_chatgpt_request(p, request, &target_model, &original_model).await?
@@ -282,11 +296,10 @@ async fn handle_openai_request(
     target_model: &str,
     original_model: &str,
 ) -> Result<crate::types::anthropic::MessagesResponse, AppError> {
-    let openai_request = convert_request(request, target_model)
-        .map_err(|e| {
-            error!(error = %e, "請求轉換失敗 / Failed to convert request");
-            AppError::bad_request(format!("Request conversion failed: {}", e))
-        })?;
+    let openai_request = convert_request(request, target_model).map_err(|e| {
+        error!(error = %e, "請求轉換失敗 / Failed to convert request");
+        AppError::bad_request(format!("Request conversion failed: {}", e))
+    })?;
 
     debug!(
         openai_model = %openai_request.model,
@@ -312,6 +325,115 @@ async fn handle_openai_request(
     })
 }
 
+async fn handle_openai_streaming_request(
+    provider: &OpenAIProvider,
+    request: MessagesRequest,
+    target_model: &str,
+    original_model: &str,
+) -> Result<Response, AppError> {
+    let mut openai_request = convert_request(request, target_model).map_err(|e| {
+        error!(error = %e, "串流請求轉換失敗 / Failed to convert streaming request");
+        AppError::bad_request(format!("Streaming request conversion failed: {}", e))
+    })?;
+    openai_request.stream = Some(true);
+
+    debug!(
+        openai_model = %openai_request.model,
+        openai_messages = openai_request.messages.len(),
+        "已轉換為 OpenAI 串流格式 / Converted to OpenAI streaming format"
+    );
+
+    if let Ok(json) = serde_json::to_string_pretty(&openai_request) {
+        debug!(
+            "OpenAI 串流請求內容 / OpenAI streaming request body:\n{}",
+            json
+        );
+    }
+
+    let upstream = provider
+        .chat_completion_stream(openai_request)
+        .await
+        .map_err(|e| {
+            error!(error = %e, "供應商串流請求失敗 / Provider streaming request failed");
+            AppError::internal(format!("Provider stream error: {}", e))
+        })?;
+
+    info!(
+        response_mode = "SSE 串流 / SSE stream (OpenAI upstream streaming)",
+        "開始轉發 OpenAI 上游串流 / Start forwarding OpenAI upstream stream"
+    );
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
+    let original_model = original_model.to_string();
+
+    tokio::spawn(async move {
+        let mut accumulator = OpenAIStreamAccumulator::new(&original_model);
+        if tx.send(Ok(accumulator.start_event())).is_err() {
+            return;
+        }
+
+        let mut stream = upstream;
+        let mut buffer = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    buffer.push_str(&text);
+                    while let Some(pos) = buffer.find('\n') {
+                        let mut line = buffer[..pos].to_string();
+                        buffer = buffer[pos + 1..].to_string();
+                        line = line.trim_end_matches('\r').to_string();
+                        let Some(data) = line.strip_prefix("data:") else {
+                            continue;
+                        };
+                        match parse_openai_stream_data_line(data) {
+                            Ok(Some(parsed)) => match accumulator.absorb_chunk(parsed) {
+                                Ok(events) => {
+                                    for event in events {
+                                        if tx.send(Ok(event)).is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error!(error = %e, "OpenAI 串流事件轉換失敗 / Failed to convert OpenAI stream event");
+                                    return;
+                                }
+                            },
+                            Ok(None) => {}
+                            Err(e) => {
+                                error!(error = %e, "OpenAI 串流事件解析失敗 / Failed to parse OpenAI stream event");
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!(error = %e, "讀取 OpenAI 上游串流失敗 / Failed to read OpenAI upstream stream");
+                    return;
+                }
+            }
+        }
+
+        match accumulator.finish_events() {
+            Ok(events) => {
+                for event in events {
+                    if tx.send(Ok(event)).is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                error!(error = %e, "OpenAI 串流完成事件轉換失敗 / Failed to finish OpenAI stream events");
+            }
+        }
+    });
+
+    let stream = UnboundedReceiverStream::new(rx);
+    Ok(Sse::new(stream).into_response())
+}
+
 /// ChatGPT Codex → 單次 Anthropic MessagesResponse（會緩衝整段 Codex SSE）
 /// ChatGPT Codex → single Anthropic MessagesResponse (buffers full Codex SSE)
 async fn chatgpt_to_anthropic_messages(
@@ -323,11 +445,10 @@ async fn chatgpt_to_anthropic_messages(
     use crate::convert::request_responses::convert_request_to_responses;
     use crate::convert::response_responses::convert_responses_to_anthropic;
 
-    let responses_request = convert_request_to_responses(request, target_model)
-        .map_err(|e| {
-            error!(error = %e, "Responses API 請求轉換失敗 / Responses API request conversion failed");
-            AppError::bad_request(format!("Responses API conversion failed: {}", e))
-        })?;
+    let responses_request = convert_request_to_responses(request, target_model).map_err(|e| {
+        error!(error = %e, "Responses API 請求轉換失敗 / Responses API request conversion failed");
+        AppError::bad_request(format!("Responses API conversion failed: {}", e))
+    })?;
 
     debug!(
         model = %responses_request.model,
@@ -336,7 +457,10 @@ async fn chatgpt_to_anthropic_messages(
     );
 
     if let Ok(json) = serde_json::to_string_pretty(&responses_request) {
-        debug!("Responses API 請求內容 / Responses API request body:\n{}", json);
+        debug!(
+            "Responses API 請求內容 / Responses API request body:\n{}",
+            json
+        );
     }
 
     let sse_text = provider

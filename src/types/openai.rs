@@ -159,3 +159,44 @@ pub struct ResponseUsage {
     pub completion_tokens: u32,
     pub total_tokens: u32,
 }
+
+// ─── Chat Completions SSE Types ───
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChatCompletionStreamChunk {
+    #[serde(default)]
+    pub choices: Vec<StreamChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ResponseUsage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamChoice {
+    pub delta: ChoiceDelta,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ChoiceDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<StreamToolCall>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamToolCall {
+    pub index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<StreamFunctionDelta>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct StreamFunctionDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<String>,
+}

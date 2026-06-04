@@ -106,12 +106,6 @@ if ($existing) {
     exit 1
 }
 
-[Console]::add_CancelKeyPress({
-    param($sender, $eventArgs)
-    $eventArgs.Cancel = $true
-    $script:StopRequested = $true
-})
-
 Write-Host "Starting CC-Adapter at $BaseUrl"
 Write-Host "Logs:"
 Write-Host "  stdout: $OutLog"
@@ -173,7 +167,7 @@ try {
     }
 
     if ($script:StopRequested) {
-        Write-Host "Ctrl+C received."
+        Write-Host "Stop requested."
     } elseif ($script:AdapterProcess.HasExited) {
         Write-Host "CC-Adapter exited with code $($script:AdapterProcess.ExitCode)."
     }

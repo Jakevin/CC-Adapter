@@ -58,6 +58,105 @@ function Wait-PortReleased {
     return $false
 }
 
+function Test-SamePath {
+    param(
+        [string]$Left,
+        [string]$Right
+    )
+
+    if (-not $Left -or -not $Right) {
+        return $false
+    }
+
+    try {
+        $leftPath = [System.IO.Path]::GetFullPath($Left)
+        $rightPath = [System.IO.Path]::GetFullPath($Right)
+        return [string]::Equals($leftPath, $rightPath, [System.StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return [string]::Equals($Left, $Right, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+}
+
+function Stop-ProcessAndWait {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [string]$Reason
+    )
+
+    if (-not $Process -or $Process.HasExited) {
+        return
+    }
+
+    Write-Host "Stopping $Reason PID $($Process.Id) ($($Process.ProcessName))..."
+    Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+    Wait-Process -Id $Process.Id -Timeout 5 -ErrorAction SilentlyContinue
+}
+
+function Get-StaleAdapterProcessIds {
+    param(
+        [int]$Port,
+        [string]$ConfigPath,
+        [string[]]$BinaryPaths
+    )
+
+    $processIds = @()
+    $connections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    if ($connections) {
+        $processIds += $connections |
+            Select-Object -ExpandProperty OwningProcess -Unique |
+            Where-Object { $_ -gt 0 }
+    }
+
+    $adapterProcesses = Get-CimInstance Win32_Process -Filter "Name = 'claude-adapter.exe'" -ErrorAction SilentlyContinue
+    foreach ($adapterProcess in $adapterProcesses) {
+        $isCurrentAdapter = $false
+
+        if ($adapterProcess.CommandLine -and $adapterProcess.CommandLine.IndexOf($ConfigPath, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $isCurrentAdapter = $true
+        }
+
+        if (-not $isCurrentAdapter -and $adapterProcess.ExecutablePath) {
+            foreach ($binaryPath in $BinaryPaths) {
+                if (Test-SamePath -Left $adapterProcess.ExecutablePath -Right $binaryPath) {
+                    $isCurrentAdapter = $true
+                    break
+                }
+            }
+        }
+
+        if ($isCurrentAdapter) {
+            $processIds += $adapterProcess.ProcessId
+        }
+    }
+
+    return $processIds | Select-Object -Unique
+}
+
+function Stop-StaleAdapterResources {
+    param(
+        [int]$Port,
+        [string]$ConfigPath,
+        [string[]]$BinaryPaths
+    )
+
+    $processIds = Get-StaleAdapterProcessIds -Port $Port -ConfigPath $ConfigPath -BinaryPaths $BinaryPaths
+
+    foreach ($processId in $processIds) {
+        $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        if (-not $process) {
+            continue
+        }
+
+        if ($process.ProcessName -eq "claude-adapter") {
+            Stop-ProcessAndWait -Process $process -Reason "stale CC-Adapter resource"
+        }
+    }
+
+    if (-not (Wait-PortReleased -Port $Port)) {
+        Write-Warning "Port $Port was not released after cleaning stale CC-Adapter resources."
+    }
+}
+
 function Stop-Adapter {
     if ($script:CleanupDone) {
         return
@@ -65,9 +164,7 @@ function Stop-Adapter {
     $script:CleanupDone = $true
 
     if ($script:AdapterProcess -and -not $script:AdapterProcess.HasExited) {
-        Write-Host "Stopping CC-Adapter..."
-        Stop-Process -Id $script:AdapterProcess.Id -Force -ErrorAction SilentlyContinue
-        Wait-Process -Id $script:AdapterProcess.Id -Timeout 5 -ErrorAction SilentlyContinue
+        Stop-ProcessAndWait -Process $script:AdapterProcess -Reason "CC-Adapter"
     }
 }
 
@@ -99,6 +196,8 @@ if ($HostValue -eq "0.0.0.0") {
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+Stop-StaleAdapterResources -Port $PortValue -ConfigPath $ConfigPath -BinaryPaths $BinaryCandidates
 
 $existing = Get-ListeningProcess -Port $PortValue
 if ($existing) {
